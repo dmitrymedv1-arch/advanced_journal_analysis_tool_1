@@ -2382,7 +2382,7 @@ class TitleKeywordAnalyzer:
 
         return content_words
 
-    def extract_compound_words(self, text: str) -> List[str]:
+    def extract_compound_words(self, text: str) -> list[str]:
         """Извлекает составные слова через дефис"""
         if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
             return []
@@ -2398,7 +2398,7 @@ class TitleKeywordAnalyzer:
 
         return filtered_compounds
 
-    def extract_scientific_stopwords(self, text: str) -> List[str]:
+    def extract_scientific_stopwords(self, text: str) -> list[str]:
         """Извлекает научные стоп-слова"""
         if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
             return []
@@ -2421,7 +2421,7 @@ class TitleKeywordAnalyzer:
 
         return scientific_words
 
-    def analyze_titles(self, titles: List[str]) -> Tuple[Counter, Counter, Counter]:
+    def analyze_titles(self, titles: list[str]) -> Tuple[Counter, Counter, Counter]:
         """Анализирует все типы слов в названиях"""
         content_words = []
         compound_words = []
@@ -4347,4 +4347,5 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
