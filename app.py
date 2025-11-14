@@ -1580,6 +1580,145 @@ def calculate_dbi_fast(analyzed_metadata):
         'top_concepts': concept_freq.most_common(10)  # Изменено с 5 на 10
     }
 
+def calculate_implied_if(citation_timing, analyzed_metadata, current_year=None):
+    """Implied Impact Factor - analog of JIF based on OpenAlex data"""
+    if current_year is None:
+        current_year = datetime.now().year
+    
+    # Articles from 2 years ago and previous year
+    articles_2y = []
+    for meta in analyzed_metadata:
+        cr = meta.get('crossref')
+        if cr:
+            pub_year = cr.get('published', {}).get('date-parts', [[0]])[0][0]
+            if pub_year in [current_year - 2, current_year - 1]:
+                articles_2y.append(meta)
+    
+    if not articles_2y:
+        return {
+            'implied_if': 0,
+            'articles_2y_count': 0,
+            'citations_1y': 0
+        }
+    
+    # Citations in previous year
+    citations_1y = 0
+    for yearly in citation_timing['yearly_citations']:
+        if yearly['year'] == current_year - 1:
+            citations_1y = yearly['citations_count']
+            break
+    
+    i_if = citations_1y / len(articles_2y) if articles_2y else 0
+    
+    return {
+        'implied_if': round(i_if, 2),
+        'articles_2y_count': len(articles_2y),
+        'citations_1y': citations_1y
+    }
+
+def calculate_ccr_fast(citation_counts):
+    """Citation Concentration Risk - minimum DOIs giving 80% of citations"""
+    if not citation_counts or sum(citation_counts) == 0:
+        return {
+            'ccr': 0,
+            'total_citations': 0,
+            'ccr_dois': []
+        }
+    
+    # Sort citations descending
+    sorted_cites = sorted(citation_counts, reverse=True)
+    total = sum(sorted_cites)
+    target = total * 0.8
+    cumulative = 0
+    ccr_dois = 0
+    
+    for cites in sorted_cites:
+        cumulative += cites
+        ccr_dois += 1
+        if cumulative >= target:
+            break
+    
+    return {
+        'ccr': ccr_dois,
+        'total_citations': total,
+        'ccr_percentage': round((cumulative / total) * 100, 1)
+    }
+
+def calculate_ali_fast(analyzed_metadata):
+    """Author Loyalty Index - % of returning authors"""
+    author_article_count = Counter()
+    
+    for meta in analyzed_metadata:
+        oa = meta.get('openalex')
+        if oa and 'authorships' in oa:
+            for auth in oa['authorships']:
+                author_id = auth.get('author', {}).get('id')
+                if author_id:
+                    author_article_count[author_id] += 1
+    
+    total_unique_authors = len(author_article_count)
+    returning_authors = sum(1 for count in author_article_count.values() if count >= 2)
+    
+    ali = (returning_authors / total_unique_authors * 100) if total_unique_authors > 0 else 0
+    
+    return {
+        'ali': round(ali, 2),
+        'total_unique_authors': total_unique_authors,
+        'returning_authors': returning_authors
+    }
+
+def calculate_idi_fast(analyzed_metadata):
+    """Interdisciplinary Index - based on unique level-0 concepts"""
+    level0_concepts = set()
+    
+    for meta in analyzed_metadata:
+        oa = meta.get('openalex')
+        if oa and 'concepts' in oa:
+            for concept in oa['concepts']:
+                # Assume level-0 is broad fields; use display_name for broad categories
+                # In real OpenAlex, use 'level' or 'international' category
+                name = concept.get('display_name', '')
+                if name and len(name.split()) <= 3:  # Heuristic for level-0
+                    level0_concepts.add(name)
+    
+    unique_level0 = len(level0_concepts)
+    total_articles = len(analyzed_metadata)
+    
+    # Expected: rough estimate, e.g., 5-10 for mono, 15+ for inter
+    expected_in_field = max(5, total_articles * 0.05)  # Heuristic
+    idi = unique_level0 / expected_in_field if expected_in_field > 0 else 0
+    
+    return {
+        'idi': round(idi, 2),
+        'unique_level0_concepts': unique_level0,
+        'expected_concepts': expected_in_field,
+        'level0_concepts': list(level0_concepts)
+    }
+
+def calculate_momentum_fast(citation_timing, current_year=None):
+    """Citation Momentum - growth of citations over recent years"""
+    if current_year is None:
+        current_year = datetime.now().year
+    
+    yearly = {item['year']: item['citations_count'] for item in citation_timing['yearly_citations']}
+    
+    recent_years = [current_year - 1, current_year]
+    previous_years = [current_year - 3, current_year - 2]
+    
+    recent_cites = sum(yearly.get(y, 0) for y in recent_years)
+    previous_cites = sum(yearly.get(y, 0) for y in previous_years)
+    
+    if previous_cites == 0:
+        momentum = 100 if recent_cites > 0 else 0
+    else:
+        momentum = ((recent_cites - previous_cites) / previous_cites) * 100
+    
+    return {
+        'momentum': round(momentum, 2),
+        'recent_citations': recent_cites,
+        'previous_citations': previous_cites
+    }
+
 def calculate_all_fast_metrics(analyzed_metadata, citing_metadata, state, journal_issn):
     """Calculation of all fast metrics in one pass with comprehensive error handling"""
     fast_metrics = {}
@@ -1718,6 +1857,68 @@ def calculate_all_fast_metrics(analyzed_metadata, citing_metadata, state, journa
             'top_concepts': []
         })
     
+    # NEW: Implied Impact Factor
+    try:
+        i_if_metrics = calculate_implied_if(citation_timing, analyzed_metadata)
+        fast_metrics.update(i_if_metrics)
+    except Exception as e:
+        st.warning(f"⚠️ Implied IF calculation failed: {str(e)}")
+        fast_metrics.update({
+            'implied_if': 0,
+            'articles_2y_count': 0,
+            'citations_1y': 0
+        })
+    
+    # NEW: Citation Concentration Risk
+    try:
+        citation_counts = [len(get_citing_dois_and_metadata((meta['crossref'].get('DOI'), state))) for meta in analyzed_metadata if meta and meta.get('crossref')]
+        ccr_metrics = calculate_ccr_fast(citation_counts)
+        fast_metrics.update(ccr_metrics)
+    except Exception as e:
+        st.warning(f"⚠️ CCR calculation failed: {str(e)}")
+        fast_metrics.update({
+            'ccr': 0,
+            'total_citations': 0,
+            'ccr_percentage': 0
+        })
+    
+    # NEW: Author Loyalty Index
+    try:
+        ali_metrics = calculate_ali_fast(analyzed_metadata)
+        fast_metrics.update(ali_metrics)
+    except Exception as e:
+        st.warning(f"⚠️ ALI calculation failed: {str(e)}")
+        fast_metrics.update({
+            'ali': 0,
+            'total_unique_authors': 0,
+            'returning_authors': 0
+        })
+    
+    # NEW: Interdisciplinary Index
+    try:
+        idi_metrics = calculate_idi_fast(analyzed_metadata)
+        fast_metrics.update(idi_metrics)
+    except Exception as e:
+        st.warning(f"⚠️ IDI calculation failed: {str(e)}")
+        fast_metrics.update({
+            'idi': 0,
+            'unique_level0_concepts': 0,
+            'expected_concepts': 0,
+            'level0_concepts': []
+        })
+    
+    # NEW: Citation Momentum
+    try:
+        momentum_metrics = calculate_momentum_fast(citation_timing)
+        fast_metrics.update(momentum_metrics)
+    except Exception as e:
+        st.warning(f"⚠️ Momentum calculation failed: {str(e)}")
+        fast_metrics.update({
+            'momentum': 0,
+            'recent_citations': 0,
+            'previous_citations': 0
+        })
+    
     # 10. Additional diagnostic information (with safe array handling)
     try:
         # Add summary statistics for debugging
@@ -1783,6 +1984,11 @@ def calculate_all_fast_metrics(analyzed_metadata, citing_metadata, state, journa
             'elite_index', 'elite_articles', 'total_articles_elite', 'citation_threshold',
             'author_gini', 'total_authors', 'articles_per_author_avg', 'articles_per_author_median',
             'DBI', 'unique_concepts', 'total_concept_mentions', 'top_concepts',
+            'implied_if', 'articles_2y_count', 'citations_1y',
+            'ccr', 'total_citations', 'ccr_percentage',
+            'ali', 'total_unique_authors', 'returning_authors',
+            'idi', 'unique_level0_concepts', 'expected_concepts', 'level0_concepts',
+            'momentum', 'recent_citations', 'previous_citations',
             'data_quality_score'
         }
         
@@ -1791,6 +1997,8 @@ def calculate_all_fast_metrics(analyzed_metadata, citing_metadata, state, journa
                 if key == 'ref_ages_25_75':
                     fast_metrics[key] = [None, None]
                 elif key == 'top_concepts':
+                    fast_metrics[key] = []
+                elif key == 'level0_concepts':
                     fast_metrics[key] = []
                 elif 'pct' in key or 'rate' in key or 'index' in key or 'premium' in key:
                     fast_metrics[key] = 0.0
@@ -1823,6 +2031,8 @@ def calculate_all_fast_metrics(analyzed_metadata, citing_metadata, state, journa
                 if key == 'ref_ages_25_75':
                     fast_metrics[key] = [None, None]
                 elif key == 'top_concepts':
+                    fast_metrics[key] = []
+                elif key == 'level0_concepts':
                     fast_metrics[key] = []
                 elif isinstance(value, (int, float)):
                     fast_metrics[key] = 0
@@ -2113,6 +2323,167 @@ def find_potential_reviewers(analyzed_metadata, citing_metadata, overlap_details
         'total_journal_authors': len(journal_authors),
         'total_overlap_authors': len(overlap_authors),
         'total_potential_reviewers': len(potential_reviewers)
+    }
+
+# === ADAPTED KEYWORD ANALYSIS CLASS AND FUNCTIONS ===
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+
+# Загружаем необходимые ресурсы NLTK
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords')
+
+class TitleKeywordAnalyzer:
+    def __init__(self):
+        self.stop_words = set(stopwords.words('english'))
+        self.stemmer = PorterStemmer()
+
+        # Научные стоп-слова
+        self.scientific_stopwords = {
+            'using', 'based', 'study', 'studies', 'research', 'analysis',
+            'effect', 'effects', 'properties', 'property', 'development',
+            'application', 'applications', 'method', 'methods', 'approach',
+            'review', 'investigation', 'characterization', 'evaluation',
+            'performance', 'behavior', 'structure', 'synthesis', 'design',
+            'fabrication', 'preparation', 'processing', 'measurement',
+            'model', 'models', 'system', 'systems', 'technology', 'material',
+            'materials', 'sample', 'samples', 'device', 'devices', 'film',
+            'films', 'layer', 'layers', 'surface', 'surfaces', 'interface',
+            'interfaces', 'nanoparticle', 'nanoparticles', 'nanostructure',
+            'nanostructures', 'composite', 'composites', 'coating', 'coatings'
+        }
+
+        self.scientific_stopwords_stemmed = {
+            self.stemmer.stem(word) for word in self.scientific_stopwords
+        }
+
+    def preprocess_content_words(self, text: str) -> List[str]:
+        """Очищает и нормализует содержательные слова"""
+        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
+            return []
+
+        text = text.lower()
+        text = re.sub(r'[^a-zA-Z\s-]', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        words = text.split()
+        content_words = []
+
+        for word in words:
+            if '-' in word:
+                continue
+            if len(word) > 2 and word not in self.stop_words:
+                stemmed_word = self.stemmer.stem(word)
+                if stemmed_word not in self.scientific_stopwords_stemmed:
+                    content_words.append(stemmed_word)
+
+        return content_words
+
+    def extract_compound_words(self, text: str) -> List[str]:
+        """Извлекает составные слова через дефис"""
+        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
+            return []
+
+        text = text.lower()
+        compound_words = re.findall(r'\b[a-z]{2,}-[a-z]{2,}(?:-[a-z]{2,})*\b', text)
+
+        filtered_compounds = []
+        for word in compound_words:
+            parts = word.split('-')
+            if not any(part in self.stop_words for part in parts):
+                filtered_compounds.append(word)
+
+        return filtered_compounds
+
+    def extract_scientific_stopwords(self, text: str) -> List[str]:
+        """Извлекает научные стоп-слова"""
+        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
+            return []
+
+        text = text.lower()
+        text = re.sub(r'[^a-zA-Z\s]', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        words = text.split()
+        scientific_words = []
+
+        for word in words:
+            if len(word) > 2:
+                stemmed_word = self.stemmer.stem(word)
+                if stemmed_word in self.scientific_stopwords_stemmed:
+                    for original_word in self.scientific_stopwords:
+                        if self.stemmer.stem(original_word) == stemmed_word:
+                            scientific_words.append(original_word)
+                            break
+
+        return scientific_words
+
+    def analyze_titles(self, titles: List[str]) -> Tuple[Counter, Counter, Counter]:
+        """Анализирует все типы слов в названиях"""
+        content_words = []
+        compound_words = []
+        scientific_words = []
+
+        valid_titles = [t for t in titles if t not in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']]
+
+        for i, title in enumerate(valid_titles):
+            content_words.extend(self.preprocess_content_words(title))
+            compound_words.extend(self.extract_compound_words(title))
+            scientific_words.extend(self.extract_scientific_stopwords(title))
+
+        return Counter(content_words), Counter(compound_words), Counter(scientific_words)
+
+def analyze_title_keywords(analyzed_metadata, all_citing_metadata):
+    """Analyze keywords from titles in analyzed and citing articles"""
+    analyzer = TitleKeywordAnalyzer()
+    
+    # Get titles from analyzed metadata
+    analyzed_titles = []
+    for meta in analyzed_metadata:
+        cr = meta.get('crossref')
+        if cr:
+            title_list = cr.get('title', [])
+            if title_list:
+                analyzed_titles.append(title_list[0])
+    
+    # Get titles from citing metadata
+    citing_titles = []
+    for meta in all_citing_metadata:
+        cr = meta.get('crossref')
+        if cr:
+            title_list = cr.get('title', [])
+            if title_list:
+                citing_titles.append(title_list[0])
+    
+    # Analyze
+    analyzed_content, analyzed_compound, analyzed_scientific = analyzer.analyze_titles(analyzed_titles)
+    citing_content, citing_compound, citing_scientific = analyzer.analyze_titles(citing_titles)
+    
+    # Combine for top-50 (focus on content words as main keywords)
+    all_content = analyzed_content + citing_content
+    top_keywords = all_content.most_common(50)
+    
+    # Prepare data for Excel: Top-50, Keywords_analyzed (freq), Keywords_citing (freq)
+    keyword_data = []
+    for rank, (word, _) in enumerate(top_keywords, 1):
+        analyzed_freq = analyzed_content[word]
+        citing_freq = citing_content[word]
+        keyword_data.append({
+            'Rank': rank,
+            'Keyword': word,
+            'Analyzed_Freq': analyzed_freq,
+            'Citing_Freq': citing_freq,
+            'Total_Freq': analyzed_freq + citing_freq
+        })
+    
+    return {
+        'top_keywords': top_keywords,
+        'analyzed_content': dict(analyzed_content),
+        'citing_content': dict(citing_content),
+        'keyword_data': keyword_data
     }
 
 # === 17. Enhanced Excel Report Creation ===
@@ -2657,7 +3028,12 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     'Author Gini Index', 'Total Authors',
                     'Average Articles per Author', 'Median Articles per Author',
                     'Diversity Balance Index (DBI)', 'Unique Concepts',
-                    'Total Concept Mentions'
+                    'Total Concept Mentions',
+                    'Implied Impact Factor', 'Articles 2Y Count', 'Citations 1Y',
+                    'Citation Concentration Risk (CCR)', 'Total Citations CCR', 'CCR Percentage',
+                    'Author Loyalty Index (ALI)', 'Total Unique Authors', 'Returning Authors',
+                    'Interdisciplinary Index (IDI)', 'Unique Level0 Concepts', 'Expected Concepts',
+                    'Citation Momentum (%)', 'Recent Citations', 'Previous Citations'
                 ],
                 'Value': [
                     safe_convert(fast_metrics.get('ref_median_age', 'N/A')),
@@ -2689,7 +3065,22 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     safe_convert(fast_metrics.get('articles_per_author_median', 0)),
                     safe_convert(fast_metrics.get('DBI', 0)),
                     safe_convert(fast_metrics.get('unique_concepts', 0)),
-                    safe_convert(fast_metrics.get('total_concept_mentions', 0))
+                    safe_convert(fast_metrics.get('total_concept_mentions', 0)),
+                    safe_convert(fast_metrics.get('implied_if', 0)),
+                    safe_convert(fast_metrics.get('articles_2y_count', 0)),
+                    safe_convert(fast_metrics.get('citations_1y', 0)),
+                    safe_convert(fast_metrics.get('ccr', 0)),
+                    safe_convert(fast_metrics.get('total_citations', 0)),
+                    f"{safe_convert(fast_metrics.get('ccr_percentage', 0))}%",
+                    f"{safe_convert(fast_metrics.get('ali', 0))}%",
+                    safe_convert(fast_metrics.get('total_unique_authors', 0)),
+                    safe_convert(fast_metrics.get('returning_authors', 0)),
+                    safe_convert(fast_metrics.get('idi', 0)),
+                    safe_convert(fast_metrics.get('unique_level0_concepts', 0)),
+                    safe_convert(fast_metrics.get('expected_concepts', 0)),
+                    f"{safe_convert(fast_metrics.get('momentum', 0))}%",
+                    safe_convert(fast_metrics.get('recent_citations', 0)),
+                    safe_convert(fast_metrics.get('previous_citations', 0))
                 ]
             }
             fast_metrics_df = pd.DataFrame(fast_metrics_data)
@@ -2703,6 +3094,13 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 }
                 top_concepts_df = pd.DataFrame(top_concepts_data)
                 top_concepts_df.to_excel(writer, sheet_name='Top_Concepts', index=False)
+
+            # === NEW SHEET: Title_keywords ===
+            if 'title_keywords' in additional_data:
+                keyword_data = additional_data['title_keywords']['keyword_data']
+                if keyword_data:
+                    title_keywords_df = pd.DataFrame(keyword_data)
+                    title_keywords_df.to_excel(writer, sheet_name='Title_keywords', index=False)
 
             # === REMOVED SHEETS: Reference_Year_Analysis, Reference_Age_Distribution, Reference_Age_Heatmap_Data, Reference_Publication ===
 
@@ -3212,6 +3610,23 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
                 help=glossary.get_tooltip('Author Gini')
             )
         
+        # NEW METRICS DISPLAY
+        col9, col10, col11, col12 = st.columns(4)
+        
+        with col9:
+            st.metric("Implied IF", fast_metrics.get('implied_if', 0))
+        with col10:
+            st.metric("CCR", fast_metrics.get('ccr', 0))
+        with col11:
+            st.metric("ALI (%)", f"{fast_metrics.get('ali', 0)}%")
+        with col12:
+            st.metric("IDI", fast_metrics.get('idi', 0))
+        
+        col13, col14 = st.columns(2)
+        
+        with col13:
+            st.metric("Momentum (%)", f"{fast_metrics.get('momentum', 0)}%")
+        
         # Detailed fast metrics information
         st.subheader(translation_manager.get_text('fast_metrics_details'))
         
@@ -3511,10 +3926,14 @@ def analyze_journal(issn, period_str):
         state
     )
     
+    # NEW: Title keywords analysis
+    title_keywords = analyze_title_keywords(analyzed_metadata, all_citing_metadata)
+    
     # Combine all additional data
     additional_data = {
         'citation_seasonality': citation_seasonality,
-        'potential_reviewers': potential_reviewers
+        'potential_reviewers': potential_reviewers,
+        'title_keywords': title_keywords
     }
     
     overall_progress.progress(0.9)
@@ -3843,6 +4262,18 @@ def main():
                 st.metric(translation_manager.get_text('elite_index'), f"{fast_metrics.get('elite_index', 0)}%")
                 st.metric(translation_manager.get_text('author_gini'), fast_metrics.get('author_gini', 0))
             
+            # NEW METRICS
+            col3, col4 = st.columns(2)
+            
+            with col3:
+                st.metric("Implied IF", fast_metrics.get('implied_if', 0))
+                st.metric("ALI (%)", f"{fast_metrics.get('ali', 0)}%")
+                st.metric("IDI", fast_metrics.get('idi', 0))
+                
+            with col4:
+                st.metric("CCR", fast_metrics.get('ccr', 0))
+                st.metric("Momentum (%)", f"{fast_metrics.get('momentum', 0)}%")
+            
             # Detailed information
             st.subheader(translation_manager.get_text('fast_metrics_details'))
             
@@ -3901,6 +4332,15 @@ def main():
                         st.write("**Top candidates:**")
                         for i, reviewer in enumerate(reviewers['potential_reviewers'][:5], 1):
                             st.write(f"{i}. **{reviewer['author']}** - {reviewer['citation_count']} citations")
+                
+                # NEW: Title keywords
+                if 'title_keywords' in additional_data:
+                    st.subheader("📝 Title Keywords Analysis")
+                    
+                    keywords = additional_data['title_keywords']
+                    if keywords['top_keywords']:
+                        top_df = pd.DataFrame(keywords['top_keywords'], columns=['Keyword', 'Total_Freq'])
+                        st.dataframe(top_df.head(20))
             else:
                 st.info("No additional predictive insights available for this analysis.")
 
