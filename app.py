@@ -2360,7 +2360,7 @@ class TitleKeywordAnalyzer:
             self.stemmer.stem(word) for word in self.scientific_stopwords
         }
 
-    def preprocess_content_words(self, text: str) -> List[str]:
+    def preprocess_content_words(self, text: str) -> list[str]:
         """Очищает и нормализует содержательные слова"""
         if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
             return []
@@ -4347,3 +4347,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
