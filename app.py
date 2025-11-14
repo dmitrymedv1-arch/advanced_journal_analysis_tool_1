@@ -2421,7 +2421,7 @@ class TitleKeywordAnalyzer:
 
         return scientific_words
 
-    def analyze_titles(self, titles: list[str]) -> Tuple[Counter, Counter, Counter]:
+    def analyze_titles(self, titles: list[str]) -> tuple[Counter, Counter, Counter]:
         """Анализирует все типы слов в названиях"""
         content_words = []
         compound_words = []
@@ -4347,5 +4347,6 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
