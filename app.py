@@ -493,8 +493,6 @@ def get_citing_dois_and_metadata(args):
             delayer.wait(success=False)
         if not success:
             break
-        if not new_items:
-            break
     state.citing_cache[analyzed_doi] = citing_list
     return citing_list
 
@@ -4832,3 +4830,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
