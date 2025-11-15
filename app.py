@@ -2894,15 +2894,19 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     citing_doi = cr.get('DOI', '')
                     usage_info = citing_works_usage.get(citing_doi, {})
                     
-                    # DEBUG: Log usage information for citing works
-                    if i < 10:  # Log first 10 for debugging
+                    # ИСПРАВЛЕНИЕ: Правильная логика отображения флагов
+                    used_for_sc = '×' if usage_info.get('used_for_sc') else ''
+                    used_for_sc_corr = '×' if usage_info.get('used_for_sc_corr') else ''
+                    used_for_if = '×' if usage_info.get('used_for_if') else ''
+                    used_for_if_corr = '×' if usage_info.get('used_for_if_corr') else ''
+                    
+                    # DEBUG для первых нескольких записей
+                    if i < 5:
                         print(f"DEBUG Citing Work {i}: {citing_doi}")
-                        print(f"  - used_for_sc: {usage_info.get('used_for_sc')}")
-                        print(f"  - used_for_sc_corr: {usage_info.get('used_for_sc_corr')}")
-                        print(f"  - used_for_if: {usage_info.get('used_for_if')}")
-                        print(f"  - used_for_if_corr: {usage_info.get('used_for_if_corr')}")
-                        print(f"  - cs_citations_count: {usage_info.get('cs_citations_count', 0)}")
-                        print(f"  - if_citations_count: {usage_info.get('if_citations_count', 0)}")
+                        print(f"  - used_for_sc: {usage_info.get('used_for_sc')} -> {used_for_sc}")
+                        print(f"  - used_for_sc_corr: {usage_info.get('used_for_sc_corr')} -> {used_for_sc_corr}")
+                        print(f"  - used_for_if: {usage_info.get('used_for_if')} -> {used_for_if}")
+                        print(f"  - used_for_if_corr: {usage_info.get('used_for_if_corr')} -> {used_for_if_corr}")
                     
                     citing_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -2920,11 +2924,11 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
                         'Work_Type': safe_convert(cr.get('type', ''))[:50],
-                        # IMPROVED LOGIC: Use citation counts as fallback for flag display
-                        'Used for SC': '×' if (usage_info.get('used_for_sc') or usage_info.get('cs_citations_count', 0) > 0) else '',
-                        'Used for SC_corr': '×' if (usage_info.get('used_for_sc_corr') or usage_info.get('cs_citations_count', 0) > 0) else '',
-                        'Used for IF': '×' if (usage_info.get('used_for_if') or usage_info.get('if_citations_count', 0) > 0) else '',
-                        'Used for IF_corr': '×' if (usage_info.get('used_for_if_corr') or usage_info.get('if_citations_count', 0) > 0) else ''
+                        # ИСПРАВЛЕНИЕ: Используем прямые значения флагов
+                        'Used for SC': used_for_sc,
+                        'Used for SC_corr': used_for_sc_corr,
+                        'Used for IF': used_for_if,
+                        'Used for IF_corr': used_for_if_corr
                     })
             
             if citing_list:
@@ -4860,4 +4864,5 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
