@@ -3391,7 +3391,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             return False
 
 # === 18. Data Visualization ===
-def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, additional_data):
+def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, additional_data, is_special_analysis=False):
     """Create visualizations for dashboard"""
     
     # Create tabs for different visualization types
@@ -3410,8 +3410,7 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
         st.subheader(translation_manager.get_text('tab_main_metrics'))
         
         # Check if we're in Special Analysis mode and show additional metrics
-        state = get_analysis_state()
-        if state.is_special_analysis and 'special_analysis_metrics' in additional_data:
+        if is_special_analysis and 'special_analysis_metrics' in additional_data:
             st.subheader("🎯 Special Analysis Metrics")
             
             special_metrics = additional_data['special_analysis_metrics']
@@ -3443,23 +3442,23 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
                     f"{special_metrics.get('impact_factor_corrected', 0):.3f}",
                     help="F/D: WoS-indexed citations (F) / Total articles (D)"
                 )
-            
+    
             # Show debug information in expander
-            with st.expander("📊 Special Analysis Details", expanded=False):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("**CiteScore Calculation:**")
-                    st.write(f"- B (Articles): {debug_info.get('B', 0)}")
-                    st.write(f"- A (Citations): {debug_info.get('A', 0)}")
-                    st.write(f"- C (Scopus Citations): {debug_info.get('C', 0)}")
-                    st.write(f"- CiteScore: {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = {special_metrics.get('cite_score', 0):.3f}")
-                
-                with col2:
-                    st.write("**Impact Factor Calculation:**")
-                    st.write(f"- D (Articles): {debug_info.get('D', 0)}")
-                    st.write(f"- E (Citations): {debug_info.get('E', 0)}")
-                    st.write(f"- F (WoS Citations): {debug_info.get('F', 0)}")
-                    st.write(f"- Impact Factor: {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = {special_metrics.get('impact_factor', 0):.3f}")
+                with st.expander("📊 Special Analysis Details", expanded=False):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**CiteScore Calculation:**")
+                        st.write(f"- B (Articles): {debug_info.get('B', 0)}")
+                        st.write(f"- A (Citations): {debug_info.get('A', 0)}")
+                        st.write(f"- C (Scopus Citations): {debug_info.get('C', 0)}")
+                        st.write(f"- CiteScore: {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = {special_metrics.get('cite_score', 0):.3f}")
+                    
+                    with col2:
+                        st.write("**Impact Factor Calculation:**")
+                        st.write(f"- D (Articles): {debug_info.get('D', 0)}")
+                        st.write(f"- E (Citations): {debug_info.get('E', 0)}")
+                        st.write(f"- F (WoS Citations): {debug_info.get('F', 0)}")
+                        st.write(f"- Impact Factor: {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = {special_metrics.get('impact_factor', 0):.3f}")
         
         col1, col2, col3, col4 = st.columns(4)
         
@@ -4412,7 +4411,8 @@ def main():
             results['citation_timing'],
             results['overlap_details'],
             results.get('fast_metrics', {}),
-            results.get('additional_data', {})
+            results.get('additional_data', {}),
+            state.is_special_analysis
         )
         
         # Detailed statistics
@@ -4721,3 +4721,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
