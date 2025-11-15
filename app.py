@@ -493,6 +493,8 @@ def get_citing_dois_and_metadata(args):
             delayer.wait(success=False)
         if not success:
             break
+        if not new_items:
+            break
     state.citing_cache[analyzed_doi] = citing_list
     return citing_list
 
@@ -2872,6 +2874,12 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             citing_list = []
             citing_works_usage = special_metrics.get('debug_info', {}).get('citing_works_usage', {})
             
+            # DEBUG: Add debug information for citing works usage
+            st.write(f"📊 DEBUG: Total citing works processed: {len(citing_data)}")
+            st.write(f"📊 DEBUG: Citing works with usage info: {len(citing_works_usage)}")
+            st.write(f"📊 DEBUG: Citing works with SC flag: {len([k for k, v in citing_works_usage.items() if v.get('used_for_sc')])}")
+            st.write(f"📊 DEBUG: Citing works with IF flag: {len([k for k, v in citing_works_usage.items() if v.get('used_for_if')])}")
+            
             for i, item in enumerate(citing_data):
                 if i >= MAX_ROWS:
                     break
@@ -2883,6 +2891,16 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     
                     citing_doi = cr.get('DOI', '')
                     usage_info = citing_works_usage.get(citing_doi, {})
+                    
+                    # DEBUG: Log usage information for citing works
+                    if i < 10:  # Log first 10 for debugging
+                        print(f"DEBUG Citing Work {i}: {citing_doi}")
+                        print(f"  - used_for_sc: {usage_info.get('used_for_sc')}")
+                        print(f"  - used_for_sc_corr: {usage_info.get('used_for_sc_corr')}")
+                        print(f"  - used_for_if: {usage_info.get('used_for_if')}")
+                        print(f"  - used_for_if_corr: {usage_info.get('used_for_if_corr')}")
+                        print(f"  - cs_citations_count: {usage_info.get('cs_citations_count', 0)}")
+                        print(f"  - if_citations_count: {usage_info.get('if_citations_count', 0)}")
                     
                     citing_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -2900,15 +2918,23 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
                         'Work_Type': safe_convert(cr.get('type', ''))[:50],
-                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
-                        'Used for SC_corr': '×' if usage_info.get('used_for_sc_corr') else '',
-                        'Used for IF': '×' if usage_info.get('used_for_if') else '',
-                        'Used for IF_corr': '×' if usage_info.get('used_for_if_corr') else ''
+                        # IMPROVED LOGIC: Use citation counts as fallback for flag display
+                        'Used for SC': '×' if (usage_info.get('used_for_sc') or usage_info.get('cs_citations_count', 0) > 0) else '',
+                        'Used for SC_corr': '×' if (usage_info.get('used_for_sc_corr') or usage_info.get('cs_citations_count', 0) > 0) else '',
+                        'Used for IF': '×' if (usage_info.get('used_for_if') or usage_info.get('if_citations_count', 0) > 0) else '',
+                        'Used for IF_corr': '×' if (usage_info.get('used_for_if_corr') or usage_info.get('if_citations_count', 0) > 0) else ''
                     })
             
             if citing_list:
                 citing_df = pd.DataFrame(citing_list)
                 citing_df.to_excel(writer, sheet_name='Citing_Works', index=False)
+                
+                # DEBUG: Show summary of flags in the final DataFrame
+                st.write(f"📊 DEBUG: Final citing works DataFrame flags:")
+                st.write(f"  - Used for SC: {len(citing_df[citing_df['Used for SC'] == '×'])}")
+                st.write(f"  - Used for SC_corr: {len(citing_df[citing_df['Used for SC_corr'] == '×'])}")
+                st.write(f"  - Used for IF: {len(citing_df[citing_df['Used for IF'] == '×'])}")
+                st.write(f"  - Used for IF_corr: {len(citing_df[citing_df['Used for IF_corr'] == '×'])}")
 
             # Sheet 3: Overlaps between analyzed and citing works
             overlap_list = []
@@ -4832,8 +4858,3 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
-
-
-
-
-
