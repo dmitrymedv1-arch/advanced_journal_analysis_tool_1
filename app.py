@@ -4412,7 +4412,7 @@ def main():
             results['overlap_details'],
             results.get('fast_metrics', {}),
             results.get('additional_data', {}),
-            results.get('special_analysis_metrics', {}).get('is_special_analysis', False) or state.is_special_analysis
+            results.get('special_analysis_metrics', {}).get('is_special_analysis', False) or getattr(state, 'is_special_analysis', False)
         )
         
         # Detailed statistics
@@ -4721,5 +4721,6 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
