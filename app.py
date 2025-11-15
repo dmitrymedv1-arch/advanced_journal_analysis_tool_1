@@ -2500,9 +2500,8 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     E = 0  # All citations for Impact Factor (COUNTING EACH CITATION) 
     F = 0  # Citations from WoS-indexed journals for Impact Factor (COUNTING EACH CITATION)
     
-    # Track which articles and citations are used for metrics (for Excel reporting)
+    # Track which articles are used for metrics (for Excel reporting)
     analyzed_articles_usage = {}
-    citing_works_usage = {}
     
     # Detailed citation tracking - count each citation separately
     citation_details = {
@@ -2710,18 +2709,6 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             if not citing_pub_date:
                 continue
             
-            # Initialize usage tracking for this citing work if not exists
-            if citing_doi not in citing_works_usage:
-                citing_works_usage[citing_doi] = {
-                    'used_for_sc': False,
-                    'used_for_sc_corr': False, 
-                    'used_for_if': False,
-                    'used_for_if_corr': False,
-                    'cs_citations_count': 0,  # Number of CiteScore citations from this work
-                    'if_citations_count': 0,  # Number of Impact Factor citations from this work
-                    'publication_date': citing_pub_date
-                }
-            
             # CiteScore calculations (A and C) - COUNT EACH CITATION
             # BOTH analyzed article AND citing work must be in CiteScore period
             analyzed_in_cs = (cs_start_date <= analyzed_pub_date <= cs_end_date)
@@ -2730,15 +2717,12 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             if analyzed_in_cs and citing_in_cs:
                 # Count this citation for CiteScore
                 A += 1
-                citing_works_usage[citing_doi]['used_for_sc'] = True
-                citing_works_usage[citing_doi]['cs_citations_count'] += 1
                 analyzed_articles_usage[analyzed_doi]['cs_citations_count'] += 1
                 citation_details['cs_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
                 
                 # Check if citing work is in Scopus
                 if is_in_scopus(citing):
                     C += 1
-                    citing_works_usage[citing_doi]['used_for_sc_corr'] = True
                     citation_details['cs_scopus_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
             
             # Impact Factor calculations (E and F) - COUNT EACH CITATION
@@ -2749,15 +2733,12 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             if analyzed_in_if_pub and citing_in_if_cite:
                 # Count this citation for Impact Factor
                 E += 1
-                citing_works_usage[citing_doi]['used_for_if'] = True
-                citing_works_usage[citing_doi]['if_citations_count'] += 1
                 analyzed_articles_usage[analyzed_doi]['if_citations_count'] += 1
                 citation_details['if_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
                 
                 # Check if citing work is in WoS
                 if is_in_wos(citing):
                     F += 1
-                    citing_works_usage[citing_doi]['used_for_if_corr'] = True
                     citation_details['if_wos_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
     
     print(f"📊 Citation Processing Complete:")
@@ -2780,7 +2761,6 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
         'E': E,
         'F': F,
         'analyzed_articles_usage': analyzed_articles_usage,
-        'citing_works_usage': citing_works_usage,
         'citation_details': citation_details,
         'total_cs_citations': len(citation_details['cs_citations']),
         'total_cs_scopus_citations': len(citation_details['cs_scopus_citations']),
@@ -2868,9 +2848,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 analyzed_df = pd.DataFrame(analyzed_list)
                 analyzed_df.to_excel(writer, sheet_name='Analyzed_Articles', index=False)
 
-            # Sheet 2: Citing works (with optimization)
+            # Sheet 2: Citing works (with optimization) - УДАЛЕНЫ КОЛОНКИ Used for SC/IF
             citing_list = []
-            citing_works_usage = special_metrics.get('debug_info', {}).get('citing_works_usage', {})
             
             for i, item in enumerate(citing_data):
                 if i >= MAX_ROWS:
@@ -2880,9 +2859,6 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     oa = item.get('openalex', {})
                     authors_list, affiliations_list, countries_list = extract_affiliations_and_countries(oa)
                     journal_info = extract_journal_info(item)
-                    
-                    citing_doi = cr.get('DOI', '')
-                    usage_info = citing_works_usage.get(citing_doi, {})
                     
                     citing_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -2899,11 +2875,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
-                        'Work_Type': safe_convert(cr.get('type', ''))[:50],
-                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
-                        'Used for SC_corr': '×' if usage_info.get('used_for_sc_corr') else '',
-                        'Used for IF': '×' if usage_info.get('used_for_if') else '',
-                        'Used for IF_corr': '×' if usage_info.get('used_for_if_corr') else ''
+                        'Work_Type': safe_convert(cr.get('type', ''))[:50]
                     })
             
             if citing_list:
@@ -3369,8 +3341,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 # Citation months
                 for month in range(1, 13):
                     month_name = datetime(2023, month, 1).strftime('%B')
-                    citation_count = safe_convert(citation_seasonality['citation_months'].get(month, 0))
-                    publication_count = safe_convert(citation_seasonality['publication_months'].get(month, 0))
+                    citation_count = safe_convert(citation_seasonality['citation_months'].get(m, 0))
+                    publication_count = safe_convert(citation_seasonality['publication_months'].get(m, 0))
                     
                     seasonality_data.append({
                         'Month_Number': safe_convert(month),
