@@ -2730,10 +2730,10 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                     citation_details['if_wos_citations'].append((analyzed_doi, citing_doi))
     
     # Calculate final metrics
-    special_metrics['cite_score'] = round(A / B, 3) if B > 0 else 0
-    special_metrics['cite_score_corrected'] = round(C / B, 3) if B > 0 else 0
-    special_metrics['impact_factor'] = round(E / D, 3) if D > 0 else 0
-    special_metrics['impact_factor_corrected'] = round(F / D, 3) if D > 0 else 0
+    special_metrics['cite_score'] = round(A / B, 2) if B > 0 else 0
+    special_metrics['cite_score_corrected'] = round(C / B, 2) if B > 0 else 0
+    special_metrics['impact_factor'] = round(E / D, 2) if D > 0 else 0
+    special_metrics['impact_factor_corrected'] = round(F / D, 2) if D > 0 else 0
     
     # Store debug information
     special_metrics['debug_info'] = {
@@ -4791,6 +4791,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
