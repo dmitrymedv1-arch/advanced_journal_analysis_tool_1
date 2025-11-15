@@ -3608,7 +3608,7 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
                 )
 
 # === 19. Main Analysis Function ===
-def analyze_journal(issn, period_str):
+def analyze_journal(issn, period_str, special_analysis=False):
     global delayer
     delayer = AdaptiveDelayer()
     
@@ -3622,13 +3622,26 @@ def analyze_journal(issn, period_str):
     overall_progress = st.progress(0)
     overall_status = st.empty()
     
-    # Period parsing
+    # Period parsing - SPECIAL ANALYSIS LOGIC
     overall_status.text(translation_manager.get_text('parsing_period'))
-    years = parse_period(period_str)
-    if not years:
-        return
-    from_date = f"{min(years)}-01-01"
-    until_date = f"{max(years)}-12-31"
+    
+    if special_analysis:
+        # Calculate dates for special analysis
+        today = datetime.now()
+        from_date = (today - timedelta(days=1580)).strftime('%Y-%m-%d')
+        until_date = (today - timedelta(days=120)).strftime('%Y-%m-%d')
+        years = list(range(int(from_date[:4]), int(until_date[:4]) + 1))
+        
+        st.info(f"🔬 **Special Analysis Mode**: Analyzing articles from {from_date} to {until_date} "
+                f"(approximately {len(years)} years of data)")
+    else:
+        # Normal period parsing
+        years = parse_period(period_str)
+        if not years:
+            return
+        from_date = f"{min(years)}-01-01"
+        until_date = f"{max(years)}-12-31"
+    
     overall_progress.progress(0.1)
     
     # Journal name
@@ -3778,8 +3791,28 @@ def analyze_journal(issn, period_str):
     additional_data = {
         'citation_seasonality': citation_seasonality,
         'potential_reviewers': potential_reviewers,
-        'title_keywords': title_keywords
+        'title_keywords': title_keywords,
+        'special_analysis': special_analysis,  # Flag for special analysis
+        'analysis_period': {
+            'from_date': from_date,
+            'until_date': until_date,
+            'years': years
+        }
     }
+    
+    # === SPECIAL ANALYSIS: Calculate additional metrics for special analysis ===
+    if special_analysis:
+        overall_status.text("Calculating special analysis metrics...")
+        
+        # Placeholder for 4 new special analysis metrics
+        special_metrics = {
+            'metric_1': 'To be implemented',
+            'metric_2': 'To be implemented', 
+            'metric_3': 'To be implemented',
+            'metric_4': 'To be implemented'
+        }
+        
+        additional_data['special_metrics'] = special_metrics
     
     overall_progress.progress(0.9)
     
@@ -3822,6 +3855,7 @@ def analyze_journal(issn, period_str):
         'journal_name': journal_name,
         'issn': issn,
         'period': period_str,
+        'special_analysis': special_analysis,
         'n_analyzed': n_analyzed,
         'n_citing': n_citing
     }
@@ -3880,11 +3914,23 @@ def main():
             help=glossary.get_tooltip('ISSN')
         )
         
+        # Special analysis checkbox
+        special_analysis = st.checkbox(
+            "🔬 Special Analysis",
+            value=False,
+            help="Analyze articles published from 1580 days ago to 120 days ago (approximately 4 years)"
+        )
+        
+        # Period input - disabled when special analysis is selected
         period = st.text_input(
             translation_manager.get_text('analysis_period'),
             value="2022-2025",
-            help=translation_manager.get_text('period_examples')
+            help=translation_manager.get_text('period_examples'),
+            disabled=special_analysis
         )
+        
+        if special_analysis:
+            st.info("🔬 **Special Analysis Mode**: Analyzing articles from last 1580 to 120 days ago")
         
         st.markdown("---")
         st.header("📚 " + translation_manager.get_text('dictionary_of_terms'))
@@ -3948,7 +3994,8 @@ def main():
                 "- " + translation_manager.get_text('capability_8') + "\n" +
                 "- **NEW:** Citation seasonality and optimal publication timing\n" +
                 "- **NEW:** Potential reviewer discovery\n" +
-                "- **NEW:** Title keywords analysis")
+                "- **NEW:** Title keywords analysis\n" +
+                "- **NEW:** Special analysis mode (1580-120 days ago)")
         
         st.warning("**" + translation_manager.get_text('note') + ":** \n" +
                   "- " + translation_manager.get_text('note_text_1') + "\n" +
@@ -3968,12 +4015,12 @@ def main():
                 st.error(translation_manager.get_text('issn_required'))
                 return
                 
-            if not period:
+            if not period and not special_analysis:
                 st.error(translation_manager.get_text('period_required'))
                 return
                 
             with st.spinner(translation_manager.get_text('analysis_starting')):
-                analyze_journal(issn, period)
+                analyze_journal(issn, period, special_analysis)
     
     with col2:
         st.subheader("📤 " + translation_manager.get_text('results'))
@@ -4004,7 +4051,10 @@ def main():
         with col2:
             st.metric(translation_manager.get_text('issn'), results['issn'])
         with col3:
-            st.metric(translation_manager.get_text('period'), results['period'])
+            if results['special_analysis']:
+                st.metric("Analysis Mode", "🔬 Special")
+            else:
+                st.metric(translation_manager.get_text('period'), results['period'])
         with col4:
             st.metric(translation_manager.get_text('articles_analyzed'), results['n_analyzed'])
         
@@ -4167,9 +4217,12 @@ def main():
                         st.write("**Top candidates:**")
                         for i, reviewer in enumerate(reviewers['potential_reviewers'][:5], 1):
                             st.write(f"{i}. **{reviewer['author']}** - {reviewer['citation_count']} citations")
-            else:
-                st.info("No additional predictive insights available for this analysis.")
-
+            
+            # Special analysis metrics
+            if results.get('special_analysis') and 'special_metrics' in additional_data:
+                st.subheader("🔬 Special Analysis Metrics")
+                st.info("Special analysis metrics will be displayed here when implemented")
+                
         with tab6:
             st.subheader("🔤 Title Keywords Analysis")
             
