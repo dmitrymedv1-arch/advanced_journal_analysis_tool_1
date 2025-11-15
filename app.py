@@ -54,6 +54,7 @@ class AnalysisState:
         self.excel_buffer = None
         self.if_data = None
         self.cs_data = None
+        self.is_special_analysis = False  # New flag for Special Analysis mode
 
 # --- Terms Dictionary ---
 class JournalAnalysisGlossary:
@@ -2431,6 +2432,277 @@ def normalize_keywords_data(keywords_data):
     
     return normalized_data
 
+# === NEW FUNCTION FOR SPECIAL ANALYSIS METRICS ===
+def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state):
+    """Calculate CiteScore and Impact Factor metrics for Special Analysis mode"""
+    
+    # Initialize metrics with default values
+    special_metrics = {
+        'cite_score': 0,
+        'cite_score_corrected': 0,
+        'impact_factor': 0,
+        'impact_factor_corrected': 0,
+        'debug_info': {}
+    }
+    
+    # Check if we're in Special Analysis mode
+    if not state.is_special_analysis:
+        return special_metrics
+    
+    # Get current date for time window calculations
+    current_date = datetime.now()
+    
+    # Define time windows for Special Analysis
+    # CiteScore windows (1580 to 120 days ago)
+    cs_start_date = current_date - timedelta(days=1580)
+    cs_end_date = current_date - timedelta(days=120)
+    
+    # Impact Factor windows
+    # Analyzed articles: 1265 to 535 days ago
+    if_analyzed_start = current_date - timedelta(days=1265)
+    if_analyzed_end = current_date - timedelta(days=535)
+    
+    # Citing works: 534 to 170 days ago  
+    if_citing_start = current_date - timedelta(days=534)
+    if_citing_end = current_date - timedelta(days=170)
+    
+    # Initialize counters
+    B = 0  # Articles for CiteScore (all in Special Analysis)
+    A = 0  # All citations for CiteScore
+    C = 0  # Citations from Scopus-indexed journals for CiteScore
+    
+    D = 0  # Articles for Impact Factor
+    E = 0  # All citations for Impact Factor  
+    F = 0  # Citations from WoS-indexed journals for Impact Factor
+    
+    # Track which articles and citations are used for metrics (for Excel reporting)
+    analyzed_articles_usage = {}
+    citing_works_usage = {}
+    
+    # Load metrics data for ISSN validation
+    load_metrics_data()
+    
+    # Helper function to check if a date falls within a window
+    def is_date_in_window(date_str, start_date, end_date):
+        if not date_str:
+            return False
+        try:
+            article_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            return start_date <= article_date <= end_date
+        except:
+            return False
+    
+    # Helper function to check if citing work is in Scopus (CS.xlsx)
+    def is_in_scopus(citing_work):
+        if not citing_work:
+            return False
+        
+        # Extract ISSNs from citing work
+        issns = []
+        cr = citing_work.get('crossref')
+        oa = citing_work.get('openalex')
+        
+        if cr:
+            cr_issns = cr.get('ISSN', [])
+            if isinstance(cr_issns, str):
+                cr_issns = [cr_issns]
+            issns.extend(cr_issns)
+        
+        if oa:
+            host_venue = oa.get('host_venue', {})
+            if host_venue:
+                oa_issns = host_venue.get('issn', [])
+                if isinstance(oa_issns, str):
+                    oa_issns = [oa_issns]
+                issns.extend(oa_issns)
+        
+        # Check each ISSN against CS data
+        for issn in issns:
+            if not issn:
+                continue
+                
+            normalized_issn = normalize_issn_for_comparison(issn)
+            if not state.cs_data.empty:
+                # Check against Print ISSN and E-ISSN columns in CS data
+                cs_match = state.cs_data[
+                    (state.cs_data['Print ISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn) |
+                    (state.cs_data['E-ISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn)
+                ]
+                if not cs_match.empty:
+                    return True
+        
+        return False
+    
+    # Helper function to check if citing work is in WoS (IF.xlsx)
+    def is_in_wos(citing_work):
+        if not citing_work:
+            return False
+        
+        # Extract ISSNs from citing work
+        issns = []
+        cr = citing_work.get('crossref')
+        oa = citing_work.get('openalex')
+        
+        if cr:
+            cr_issns = cr.get('ISSN', [])
+            if isinstance(cr_issns, str):
+                cr_issns = [cr_issns]
+            issns.extend(cr_issns)
+        
+        if oa:
+            host_venue = oa.get('host_venue', {})
+            if host_venue:
+                oa_issns = host_venue.get('issn', [])
+                if isinstance(oa_issns, str):
+                    oa_issns = [oa_issns]
+                issns.extend(oa_issns)
+        
+        # Check each ISSN against IF data
+        for issn in issns:
+            if not issn:
+                continue
+                
+            normalized_issn = normalize_issn_for_comparison(issn)
+            if not state.if_data.empty:
+                # Check against ISSN and eISSN columns in IF data
+                if_match = state.if_data[
+                    (state.if_data['ISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn) |
+                    (state.if_data['eISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn)
+                ]
+                if not if_match.empty:
+                    return True
+        
+        return False
+    
+    # Process analyzed articles for CiteScore (B)
+    for analyzed in analyzed_metadata:
+        if not analyzed or not analyzed.get('crossref'):
+            continue
+            
+        analyzed_doi = analyzed['crossref'].get('DOI')
+        if not analyzed_doi:
+            continue
+            
+        # Get publication date
+        pub_date = None
+        cr = analyzed['crossref']
+        date_parts = cr.get('published', {}).get('date-parts', [[]])[0]
+        if date_parts and len(date_parts) >= 1:
+            try:
+                year = date_parts[0]
+                month = date_parts[1] if len(date_parts) > 1 else 1
+                day = date_parts[2] if len(date_parts) > 2 else 1
+                pub_date = datetime(year, month, day)
+            except:
+                pass
+        
+        # For CiteScore, all articles in Special Analysis are counted (B)
+        B += 1
+        analyzed_articles_usage[analyzed_doi] = {
+            'used_for_sc': True,  # All articles in Special Analysis are used for SC
+            'used_for_if': False  # Will be set below for IF calculation
+        }
+        
+        # Check if this article should be used for Impact Factor (D)
+        if pub_date and (if_analyzed_start <= pub_date <= if_analyzed_end):
+            D += 1
+            analyzed_articles_usage[analyzed_doi]['used_for_if'] = True
+    
+    # Process citing works and citations
+    for analyzed in analyzed_metadata:
+        if not analyzed or not analyzed.get('crossref'):
+            continue
+            
+        analyzed_doi = analyzed['crossref'].get('DOI')
+        if not analyzed_doi:
+            continue
+            
+        # Get analyzed article publication date
+        analyzed_pub_date = None
+        cr = analyzed['crossref']
+        date_parts = cr.get('published', {}).get('date-parts', [[]])[0]
+        if date_parts and len(date_parts) >= 1:
+            try:
+                year = date_parts[0]
+                month = date_parts[1] if len(date_parts) > 1 else 1
+                day = date_parts[2] if len(date_parts) > 2 else 1
+                analyzed_pub_date = datetime(year, month, day)
+            except:
+                pass
+        
+        # Get citing works for this analyzed article
+        citings = state.citing_cache.get(analyzed_doi, [])
+        
+        for citing in citings:
+            if not citing:
+                continue
+                
+            citing_doi = citing.get('doi')
+            if not citing_doi:
+                continue
+            
+            # Initialize usage tracking for this citing work
+            if citing_doi not in citing_works_usage:
+                citing_works_usage[citing_doi] = {
+                    'used_for_sc': False,
+                    'used_for_sc_corr': False, 
+                    'used_for_if': False,
+                    'used_for_if_corr': False
+                }
+            
+            # Get citing work publication date
+            citing_pub_date_str = citing.get('pub_date')
+            citing_pub_date = None
+            if citing_pub_date_str:
+                try:
+                    citing_pub_date = datetime.fromisoformat(citing_pub_date_str.replace('Z', '+00:00'))
+                except:
+                    pass
+            
+            # CiteScore calculations (A and C)
+            if (citing_pub_date and (cs_start_date <= citing_pub_date <= cs_end_date) and
+                analyzed_pub_date and (cs_start_date <= analyzed_pub_date <= cs_end_date)):
+                
+                A += 1
+                citing_works_usage[citing_doi]['used_for_sc'] = True
+                
+                # Check if citing work is in Scopus
+                if is_in_scopus(citing):
+                    C += 1
+                    citing_works_usage[citing_doi]['used_for_sc_corr'] = True
+            
+            # Impact Factor calculations (E and F)
+            if (citing_pub_date and (if_citing_start <= citing_pub_date <= if_citing_end) and
+                analyzed_pub_date and (if_analyzed_start <= analyzed_pub_date <= if_analyzed_end)):
+                
+                E += 1
+                citing_works_usage[citing_doi]['used_for_if'] = True
+                
+                # Check if citing work is in WoS
+                if is_in_wos(citing):
+                    F += 1
+                    citing_works_usage[citing_doi]['used_for_if_corr'] = True
+    
+    # Calculate final metrics
+    special_metrics['cite_score'] = round(A / B, 3) if B > 0 else 0
+    special_metrics['cite_score_corrected'] = round(C / B, 3) if B > 0 else 0
+    special_metrics['impact_factor'] = round(E / D, 3) if D > 0 else 0
+    special_metrics['impact_factor_corrected'] = round(F / D, 3) if D > 0 else 0
+    
+    # Store debug information
+    special_metrics['debug_info'] = {
+        'B': B,
+        'A': A, 
+        'C': C,
+        'D': D,
+        'E': E,
+        'F': F,
+        'analyzed_articles_usage': analyzed_articles_usage,
+        'citing_works_usage': citing_works_usage
+    }
+    
+    return special_metrics
+
 # === 17. Enhanced Excel Report Creation ===
 def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
     """Create enhanced Excel report with error handling for large data"""
@@ -2463,6 +2735,11 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             analyzed_list = []
             MAX_ROWS = 50000  # Limit for large data
             
+            # Get special analysis metrics if available
+            state = get_analysis_state()
+            special_metrics = additional_data.get('special_analysis_metrics', {})
+            analyzed_articles_usage = special_metrics.get('debug_info', {}).get('analyzed_articles_usage', {})
+            
             for i, item in enumerate(analyzed_data):
                 if i >= MAX_ROWS:
                     break
@@ -2471,6 +2748,9 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     oa = item.get('openalex', {})
                     authors_list, affiliations_list, countries_list = extract_affiliations_and_countries(oa)
                     journal_info = extract_journal_info(item)
+                    
+                    analyzed_doi = cr.get('DOI', '')
+                    usage_info = analyzed_articles_usage.get(analyzed_doi, {})
                     
                     analyzed_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -2487,7 +2767,9 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
-                        'Work_Type': safe_convert(cr.get('type', ''))[:50]
+                        'Work_Type': safe_convert(cr.get('type', ''))[:50],
+                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
+                        'Used for IF': '×' if usage_info.get('used_for_if') else ''
                     })
             
             if analyzed_list:
@@ -2496,6 +2778,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
 
             # Sheet 2: Citing works (with optimization)
             citing_list = []
+            citing_works_usage = special_metrics.get('debug_info', {}).get('citing_works_usage', {})
+            
             for i, item in enumerate(citing_data):
                 if i >= MAX_ROWS:
                     break
@@ -2504,6 +2788,9 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     oa = item.get('openalex', {})
                     authors_list, affiliations_list, countries_list = extract_affiliations_and_countries(oa)
                     journal_info = extract_journal_info(item)
+                    
+                    citing_doi = cr.get('DOI', '')
+                    usage_info = citing_works_usage.get(citing_doi, {})
                     
                     citing_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -2520,7 +2807,11 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
-                        'Work_Type': safe_convert(cr.get('type', ''))[:50]
+                        'Work_Type': safe_convert(cr.get('type', ''))[:50],
+                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
+                        'Used for SC_corr': '×' if usage_info.get('used_for_sc_corr') else '',
+                        'Used for IF': '×' if usage_info.get('used_for_if') else '',
+                        'Used for IF_corr': '×' if usage_info.get('used_for_if_corr') else ''
                     })
             
             if citing_list:
@@ -3032,6 +3323,40 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     reviewers_df = pd.DataFrame(reviewers_data)
                     reviewers_df.to_excel(writer, sheet_name='Potential_Reviewers', index=False)
 
+            # Sheet 23: Special Analysis Metrics (NEW)
+            if 'special_analysis_metrics' in additional_data:
+                special_metrics = additional_data['special_analysis_metrics']
+                debug_info = special_metrics.get('debug_info', {})
+                
+                special_metrics_data = {
+                    'Metric': [
+                        'CiteScore (A/B)',
+                        'CiteScore Corrected (C/B)', 
+                        'Impact Factor (E/D)',
+                        'Impact Factor Corrected (F/D)',
+                        'B (Articles for CiteScore)',
+                        'A (Citations for CiteScore)',
+                        'C (Scopus Citations for CiteScore)',
+                        'D (Articles for Impact Factor)',
+                        'E (Citations for Impact Factor)',
+                        'F (WoS Citations for Impact Factor)'
+                    ],
+                    'Value': [
+                        safe_convert(special_metrics.get('cite_score', 0)),
+                        safe_convert(special_metrics.get('cite_score_corrected', 0)),
+                        safe_convert(special_metrics.get('impact_factor', 0)),
+                        safe_convert(special_metrics.get('impact_factor_corrected', 0)),
+                        safe_convert(debug_info.get('B', 0)),
+                        safe_convert(debug_info.get('A', 0)),
+                        safe_convert(debug_info.get('C', 0)),
+                        safe_convert(debug_info.get('D', 0)),
+                        safe_convert(debug_info.get('E', 0)),
+                        safe_convert(debug_info.get('F', 0))
+                    ]
+                }
+                special_metrics_df = pd.DataFrame(special_metrics_data)
+                special_metrics_df.to_excel(writer, sheet_name='Special_Analysis_Metrics', index=False)
+
             # Ensure at least one sheet exists
             if len(writer.sheets) == 0:
                 summary_df = pd.DataFrame({
@@ -3083,6 +3408,58 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
     
     with tab1:
         st.subheader(translation_manager.get_text('tab_main_metrics'))
+        
+        # Check if we're in Special Analysis mode and show additional metrics
+        state = get_analysis_state()
+        if state.is_special_analysis and 'special_analysis_metrics' in additional_data:
+            st.subheader("🎯 Special Analysis Metrics")
+            
+            special_metrics = additional_data['special_analysis_metrics']
+            debug_info = special_metrics.get('debug_info', {})
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "CiteScore", 
+                    f"{special_metrics.get('cite_score', 0):.3f}",
+                    help="A/B: Total citations (A) / Total articles (B) in Special Analysis period"
+                )
+            with col2:
+                st.metric(
+                    "CiteScore Corrected", 
+                    f"{special_metrics.get('cite_score_corrected', 0):.3f}",
+                    help="C/B: Scopus-indexed citations (C) / Total articles (B)"
+                )
+            with col3:
+                st.metric(
+                    "Impact Factor", 
+                    f"{special_metrics.get('impact_factor', 0):.3f}",
+                    help="E/D: Total citations (E) / Total articles (D) in IF calculation period"
+                )
+            with col4:
+                st.metric(
+                    "Impact Factor Corrected", 
+                    f"{special_metrics.get('impact_factor_corrected', 0):.3f}",
+                    help="F/D: WoS-indexed citations (F) / Total articles (D)"
+                )
+            
+            # Show debug information in expander
+            with st.expander("📊 Special Analysis Details", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**CiteScore Calculation:**")
+                    st.write(f"- B (Articles): {debug_info.get('B', 0)}")
+                    st.write(f"- A (Citations): {debug_info.get('A', 0)}")
+                    st.write(f"- C (Scopus Citations): {debug_info.get('C', 0)}")
+                    st.write(f"- CiteScore: {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = {special_metrics.get('cite_score', 0):.3f}")
+                
+                with col2:
+                    st.write("**Impact Factor Calculation:**")
+                    st.write(f"- D (Articles): {debug_info.get('D', 0)}")
+                    st.write(f"- E (Citations): {debug_info.get('E', 0)}")
+                    st.write(f"- F (WoS Citations): {debug_info.get('F', 0)}")
+                    st.write(f"- Impact Factor: {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = {special_metrics.get('impact_factor', 0):.3f}")
         
         col1, col2, col3, col4 = st.columns(4)
         
@@ -3608,12 +3985,16 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
                 )
 
 # === 19. Main Analysis Function ===
-def analyze_journal(issn, period_str, special_analysis=False):
+def analyze_journal(issn, period_str):
     global delayer
     delayer = AdaptiveDelayer()
     
     state = get_analysis_state()
     state.analysis_complete = False
+    
+    # Check if this is Special Analysis based on period
+    # Special Analysis is defined as period "1580-120" or similar
+    state.is_special_analysis = "1580" in period_str and "120" in period_str
     
     # Load metrics data at the start
     load_metrics_data()
@@ -3622,26 +4003,13 @@ def analyze_journal(issn, period_str, special_analysis=False):
     overall_progress = st.progress(0)
     overall_status = st.empty()
     
-    # Period parsing - SPECIAL ANALYSIS LOGIC
+    # Period parsing
     overall_status.text(translation_manager.get_text('parsing_period'))
-    
-    if special_analysis:
-        # Calculate dates for special analysis
-        today = datetime.now()
-        from_date = (today - timedelta(days=1580)).strftime('%Y-%m-%d')
-        until_date = (today - timedelta(days=120)).strftime('%Y-%m-%d')
-        years = list(range(int(from_date[:4]), int(until_date[:4]) + 1))
-        
-        st.info(f"🔬 **Special Analysis Mode**: Analyzing articles from {from_date} to {until_date} "
-                f"(approximately {len(years)} years of data)")
-    else:
-        # Normal period parsing
-        years = parse_period(period_str)
-        if not years:
-            return
-        from_date = f"{min(years)}-01-01"
-        until_date = f"{max(years)}-12-31"
-    
+    years = parse_period(period_str)
+    if not years:
+        return
+    from_date = f"{min(years)}-01-01"
+    until_date = f"{max(years)}-12-31"
     overall_progress.progress(0.1)
     
     # Journal name
@@ -3758,6 +4126,12 @@ def analyze_journal(issn, period_str, special_analysis=False):
     overall_status.text(translation_manager.get_text('calculating_fast_metrics'))
     fast_metrics = calculate_all_fast_metrics(analyzed_metadata, all_citing_metadata, state, issn)
     
+    # Special Analysis metrics calculation (NEW)
+    special_analysis_metrics = {}
+    if state.is_special_analysis:
+        overall_status.text("Calculating Special Analysis metrics...")
+        special_analysis_metrics = calculate_special_analysis_metrics(analyzed_metadata, all_citing_metadata, state)
+    
     # === NEW ADDITIONAL ANALYSES ===
     overall_status.text("Calculating additional insights...")
     
@@ -3791,28 +4165,12 @@ def analyze_journal(issn, period_str, special_analysis=False):
     additional_data = {
         'citation_seasonality': citation_seasonality,
         'potential_reviewers': potential_reviewers,
-        'title_keywords': title_keywords,
-        'special_analysis': special_analysis,  # Flag for special analysis
-        'analysis_period': {
-            'from_date': from_date,
-            'until_date': until_date,
-            'years': years
-        }
+        'title_keywords': title_keywords
     }
     
-    # === SPECIAL ANALYSIS: Calculate additional metrics for special analysis ===
-    if special_analysis:
-        overall_status.text("Calculating special analysis metrics...")
-        
-        # Placeholder for 4 new special analysis metrics
-        special_metrics = {
-            'metric_1': 'To be implemented',
-            'metric_2': 'To be implemented', 
-            'metric_3': 'To be implemented',
-            'metric_4': 'To be implemented'
-        }
-        
-        additional_data['special_metrics'] = special_metrics
+    # Add special analysis metrics if available
+    if state.is_special_analysis:
+        additional_data['special_analysis_metrics'] = special_analysis_metrics
     
     overall_progress.progress(0.9)
     
@@ -3855,10 +4213,13 @@ def analyze_journal(issn, period_str, special_analysis=False):
         'journal_name': journal_name,
         'issn': issn,
         'period': period_str,
-        'special_analysis': special_analysis,
         'n_analyzed': n_analyzed,
         'n_citing': n_citing
     }
+    
+    # Add special analysis metrics to results if available
+    if state.is_special_analysis:
+        state.analysis_results['special_analysis_metrics'] = special_analysis_metrics
     
     state.analysis_complete = True
     
@@ -3914,23 +4275,11 @@ def main():
             help=glossary.get_tooltip('ISSN')
         )
         
-        # Special analysis checkbox
-        special_analysis = st.checkbox(
-            "🔬 Special Analysis",
-            value=False,
-            help="Analyze articles published from 1580 days ago to 120 days ago (approximately 4 years)"
-        )
-        
-        # Period input - disabled when special analysis is selected
         period = st.text_input(
             translation_manager.get_text('analysis_period'),
             value="2022-2025",
-            help=translation_manager.get_text('period_examples'),
-            disabled=special_analysis
+            help=translation_manager.get_text('period_examples')
         )
-        
-        if special_analysis:
-            st.info("🔬 **Special Analysis Mode**: Analyzing articles from last 1580 to 120 days ago")
         
         st.markdown("---")
         st.header("📚 " + translation_manager.get_text('dictionary_of_terms'))
@@ -3995,7 +4344,7 @@ def main():
                 "- **NEW:** Citation seasonality and optimal publication timing\n" +
                 "- **NEW:** Potential reviewer discovery\n" +
                 "- **NEW:** Title keywords analysis\n" +
-                "- **NEW:** Special analysis mode (1580-120 days ago)")
+                "- **NEW:** Special Analysis metrics (CiteScore & Impact Factor)")
         
         st.warning("**" + translation_manager.get_text('note') + ":** \n" +
                   "- " + translation_manager.get_text('note_text_1') + "\n" +
@@ -4015,12 +4364,12 @@ def main():
                 st.error(translation_manager.get_text('issn_required'))
                 return
                 
-            if not period and not special_analysis:
+            if not period:
                 st.error(translation_manager.get_text('period_required'))
                 return
                 
             with st.spinner(translation_manager.get_text('analysis_starting')):
-                analyze_journal(issn, period, special_analysis)
+                analyze_journal(issn, period)
     
     with col2:
         st.subheader("📤 " + translation_manager.get_text('results'))
@@ -4051,10 +4400,7 @@ def main():
         with col2:
             st.metric(translation_manager.get_text('issn'), results['issn'])
         with col3:
-            if results['special_analysis']:
-                st.metric("Analysis Mode", "🔬 Special")
-            else:
-                st.metric(translation_manager.get_text('period'), results['period'])
+            st.metric(translation_manager.get_text('period'), results['period'])
         with col4:
             st.metric(translation_manager.get_text('articles_analyzed'), results['n_analyzed'])
         
@@ -4073,13 +4419,14 @@ def main():
         st.markdown("---")
         st.header("📈 " + translation_manager.get_text('detailed_statistics'))
         
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
             translation_manager.get_text('analyzed_articles'), 
             translation_manager.get_text('citing_works'), 
             translation_manager.get_text('comparative_analysis'), 
             translation_manager.get_text('fast_metrics'),
             "🔮 Predictive Insights",
-            "🔤 Title Keywords"
+            "🔤 Title Keywords",
+            "🎯 Special Analysis"
         ])
         
         with tab1:
@@ -4217,12 +4564,9 @@ def main():
                         st.write("**Top candidates:**")
                         for i, reviewer in enumerate(reviewers['potential_reviewers'][:5], 1):
                             st.write(f"{i}. **{reviewer['author']}** - {reviewer['citation_count']} citations")
-            
-            # Special analysis metrics
-            if results.get('special_analysis') and 'special_metrics' in additional_data:
-                st.subheader("🔬 Special Analysis Metrics")
-                st.info("Special analysis metrics will be displayed here when implemented")
-                
+            else:
+                st.info("No additional predictive insights available for this analysis.")
+
         with tab6:
             st.subheader("🔤 Title Keywords Analysis")
             
@@ -4285,6 +4629,94 @@ def main():
                         st.dataframe(scientific_df)
             else:
                 st.info("Title keywords analysis not available for this dataset.")
+
+        with tab7:
+            st.subheader("🎯 Special Analysis Metrics")
+            
+            if state.is_special_analysis and 'special_analysis_metrics' in results:
+                special_metrics = results['special_analysis_metrics']
+                debug_info = special_metrics.get('debug_info', {})
+                
+                st.success("**Special Analysis Mode Active** - Calculating CiteScore and Impact Factor metrics")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric(
+                        "CiteScore", 
+                        f"{special_metrics.get('cite_score', 0):.3f}",
+                        delta=None,
+                        help="Total citations (A) / Total articles (B) in Special Analysis period"
+                    )
+                with col2:
+                    st.metric(
+                        "CiteScore Corrected", 
+                        f"{special_metrics.get('cite_score_corrected', 0):.3f}",
+                        delta=None,
+                        help="Scopus-indexed citations (C) / Total articles (B)"
+                    )
+                with col3:
+                    st.metric(
+                        "Impact Factor", 
+                        f"{special_metrics.get('impact_factor', 0):.3f}",
+                        delta=None,
+                        help="Total citations (E) / Total articles (D) in IF calculation period"
+                    )
+                with col4:
+                    st.metric(
+                        "Impact Factor Corrected", 
+                        f"{special_metrics.get('impact_factor_corrected', 0):.3f}",
+                        delta=None,
+                        help="WoS-indexed citations (F) / Total articles (D)"
+                    )
+                
+                # Detailed calculation breakdown
+                with st.expander("📊 Calculation Details", expanded=True):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("CiteScore Calculation")
+                        st.write(f"**B (Total Articles):** {debug_info.get('B', 0)}")
+                        st.write(f"**A (Total Citations):** {debug_info.get('A', 0)}")
+                        st.write(f"**C (Scopus Citations):** {debug_info.get('C', 0)}")
+                        st.write(f"**CiteScore:** {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = **{special_metrics.get('cite_score', 0):.3f}**")
+                        st.write(f"**CiteScore Corrected:** {debug_info.get('C', 0)} / {debug_info.get('B', 0)} = **{special_metrics.get('cite_score_corrected', 0):.3f}**")
+                    
+                    with col2:
+                        st.subheader("Impact Factor Calculation")
+                        st.write(f"**D (IF Articles):** {debug_info.get('D', 0)}")
+                        st.write(f"**E (IF Citations):** {debug_info.get('E', 0)}")
+                        st.write(f"**F (WoS Citations):** {debug_info.get('F', 0)}")
+                        st.write(f"**Impact Factor:** {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = **{special_metrics.get('impact_factor', 0):.3f}**")
+                        st.write(f"**Impact Factor Corrected:** {debug_info.get('F', 0)} / {debug_info.get('D', 0)} = **{special_metrics.get('impact_factor_corrected', 0):.3f}**")
+                
+                # Interpretation guidance
+                with st.expander("💡 Interpretation Guide", expanded=False):
+                    st.write("""
+                    **CiteScore Interpretation:**
+                    - **> 1.0**: Above average citation impact for the field
+                    - **0.5-1.0**: Average citation impact  
+                    - **< 0.5**: Below average citation impact
+                    
+                    **Impact Factor Interpretation:**
+                    - **> 3.0**: High impact journal
+                    - **1.0-3.0**: Medium impact journal
+                    - **< 1.0**: Lower impact journal
+                    
+                    **Corrected vs Regular Metrics:**
+                    - Regular metrics include citations from all sources
+                    - Corrected metrics only include citations from indexed journals (Scopus/WoS)
+                    - Large differences may indicate citation patterns from non-indexed sources
+                    """)
+            else:
+                st.info("""
+                **Special Analysis Metrics** are available when analyzing the specific period 
+                for CiteScore and Impact Factor calculation (typically 1580-120 days for CiteScore 
+                and specific windows for Impact Factor).
+                
+                To enable Special Analysis metrics, use the appropriate analysis period that matches
+                the calculation windows for these metrics.
+                """)
 
 # Run application
 if __name__ == "__main__":
