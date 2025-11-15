@@ -2151,17 +2151,37 @@ class TitleKeywordsAnalyzer:
         
         # Научные стоп-слова
         self.scientific_stopwords = {
-            'using', 'based', 'study', 'studies', 'research', 'analysis',
-            'effect', 'effects', 'properties', 'property', 'development',
-            'application', 'applications', 'method', 'methods', 'approach',
-            'review', 'investigation', 'characterization', 'evaluation',
-            'performance', 'behavior', 'structure', 'synthesis', 'design',
-            'fabrication', 'preparation', 'processing', 'measurement',
-            'model', 'models', 'system', 'systems', 'technology', 'material',
-            'materials', 'sample', 'samples', 'device', 'devices', 'film',
-            'films', 'layer', 'layers', 'surface', 'surfaces', 'interface',
-            'interfaces', 'nanoparticle', 'nanoparticles', 'nanostructure',
-            'nanostructures', 'composite', 'composites', 'coating', 'coatings'
+            'activation', 'adaptive', 'advanced', 'analysis', 'application',
+            'applications', 'approach', 'architecture', 'artificial', 'assessment',
+            'based', 'behavior', 'capacity', 'characteristics', 'characterization',
+            'coating', 'coatings', 'comparative', 'computational', 'composite',
+            'composites', 'control', 'cycle', 'damage', 'data', 'density', 'design',
+            'detection', 'development', 'device', 'devices', 'diagnosis', 'discovery',
+            'dynamic', 'dynamics', 'economic', 'effect', 'effects', 'efficacy',
+            'efficient', 'energy', 'engineering', 'enhanced', 'environmental',
+            'evaluation', 'experimental', 'exploration', 'factors', 'failure',
+            'fabrication', 'field', 'film', 'films', 'flow', 'framework', 'frequency',
+            'functional', 'growth', 'high', 'impact', 'improved', 'improvement',
+            'induced', 'influence', 'information', 'innovative', 'intelligent',
+            'interaction', 'interface', 'interfaces', 'investigation', 'knowledge',
+            'layer', 'layers', 'learning', 'magnetic', 'management', 'material',
+            'materials', 'measurement', 'mechanism', 'mechanisms', 'medical',
+            'method', 'methods', 'model', 'models', 'modification', 'modulation',
+            'molecular', 'monitoring', 'motion', 'nanoparticle', 'nanoparticles',
+            'nanostructure', 'nanostructures', 'network', 'neural', 'new', 'nonlinear',
+            'novel', 'numerical', 'optical', 'optimization', 'pattern', 'performance',
+            'phenomenon', 'potential', 'power', 'prediction', 'preparation', 'process',
+            'processing', 'production', 'progression', 'property', 'properties',
+            'quality', 'regulation', 'relationship', 'reliability', 'remote', 'repair',
+            'research', 'resistance', 'response', 'review', 'risk', 'role', 'safety',
+            'sample', 'samples', 'scale', 'screening', 'separation', 'signal',
+            'simulation', 'specific', 'stability', 'stable', 'state', 'storage',
+            'strain', 'strength', 'stress', 'structural', 'structure', 'study',
+            'studies', 'sustainable', 'synergy', 'synthesis', 'system', 'systems',
+            'targeted', 'techniques', 'technology', 'testing', 'theoretical', 'therapy',
+            'thermal', 'tissue', 'tolerance', 'toxicity', 'transformation', 'transition',
+            'transmission', 'transport', 'type', 'understanding', 'using', 'validation',
+            'value', 'variation', 'virtual', 'waste', 'wave'
         }
         
         # Стемминг научных стоп-слов
@@ -4366,9 +4386,6 @@ def main():
                 "- " + translation_manager.get_text('capability_6') + "\n" +
                 "- " + translation_manager.get_text('capability_7') + "\n" +
                 "- " + translation_manager.get_text('capability_8') + "\n" +
-                "- **NEW:** Citation seasonality and optimal publication timing\n" +
-                "- **NEW:** Potential reviewer discovery\n" +
-                "- **NEW:** Title keywords analysis\n" +
                 "- **NEW:** Special Analysis metrics (CiteScore & Impact Factor)")
         
         st.warning("**" + translation_manager.get_text('note') + ":** \n" +
@@ -4747,4 +4764,5 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
