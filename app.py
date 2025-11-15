@@ -471,8 +471,7 @@ def get_citing_dois_and_metadata(args):
                 resp = requests.get(f"{url}&cursor={cursor}", timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
-                    new_items = data.get('results', [])  # Определяем new_items здесь
-                    for w in new_items:
+                    for w in data.get('results', []):
                         c_doi = w.get('doi')
                         if c_doi:
                             if c_doi not in state.crossref_cache:
@@ -493,8 +492,6 @@ def get_citing_dois_and_metadata(args):
                 pass
             delayer.wait(success=False)
         if not success:
-            break
-        if not new_items:  # Теперь new_items определена
             break
     state.citing_cache[analyzed_doi] = citing_list
     return citing_list
@@ -586,14 +583,13 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
     while cursor:
         params['cursor'] = cursor
         success = False
-        new_items = []  # Определяем new_items здесь
         for _ in range(RETRIES):
             try:
                 rate_limiter.wait_if_needed()
                 resp = requests.get(base_url, params=params, timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
-                    new_items = data['message']['items']  # Присваиваем значение
+                    new_items = data['message']['items']
                     items.extend(new_items)
                     cursor = data['message'].get('next-cursor')
                     
@@ -610,7 +606,7 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
             delayer.wait(success=False)
         if not success:
             break
-        if not new_items:  # Теперь new_items определена
+        if not new_items:
             break
     
     progress_bar.progress(1.0)
@@ -2675,31 +2671,6 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     
     total_citations_processed = 0
     
-    # === ИСПРАВЛЕНИЕ: Явная инициализация citing_works_usage для всех уникальных цитирующих DOI перед циклом ===
-    unique_citing_dois = set()
-    for analyzed in analyzed_metadata:
-        if analyzed and analyzed.get('crossref'):
-            analyzed_doi = analyzed['crossref'].get('DOI')
-            if analyzed_doi:
-                citings = state.citing_cache.get(analyzed_doi, [])
-                for citing in citings:
-                    citing_doi = citing.get('doi')
-                    if citing_doi:
-                        unique_citing_dois.add(citing_doi)
-    
-    for citing_doi in unique_citing_dois:
-        if citing_doi not in citing_works_usage:
-            citing_works_usage[citing_doi] = {
-                'used_for_sc': False,
-                'used_for_sc_corr': False, 
-                'used_for_if': False,
-                'used_for_if_corr': False,
-                'cs_citations_count': 0,  # Number of CiteScore citations from this work
-                'if_citations_count': 0,  # Number of Impact Factor citations from this work
-                'publication_date': None  # Will be set later if needed
-            }
-    # === КОНЕЦ ИСПРАВЛЕНИЯ ===
-    
     for analyzed in analyzed_metadata:
         if not analyzed or not analyzed.get('crossref'):
             continue
@@ -2901,12 +2872,6 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             citing_list = []
             citing_works_usage = special_metrics.get('debug_info', {}).get('citing_works_usage', {})
             
-            # DEBUG: Add debug information for citing works usage
-            st.write(f"📊 DEBUG: Total citing works processed: {len(citing_data)}")
-            st.write(f"📊 DEBUG: Citing works with usage info: {len(citing_works_usage)}")
-            st.write(f"📊 DEBUG: Citing works with SC flag: {len([k for k, v in citing_works_usage.items() if v.get('used_for_sc')])}")
-            st.write(f"📊 DEBUG: Citing works with IF flag: {len([k for k, v in citing_works_usage.items() if v.get('used_for_if')])}")
-            
             for i, item in enumerate(citing_data):
                 if i >= MAX_ROWS:
                     break
@@ -2918,20 +2883,6 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     
                     citing_doi = cr.get('DOI', '')
                     usage_info = citing_works_usage.get(citing_doi, {})
-                    
-                    # ИСПРАВЛЕНИЕ: Правильная логика отображения флагов
-                    used_for_sc = '×' if usage_info.get('used_for_sc') else ''
-                    used_for_sc_corr = '×' if usage_info.get('used_for_sc_corr') else ''
-                    used_for_if = '×' if usage_info.get('used_for_if') else ''
-                    used_for_if_corr = '×' if usage_info.get('used_for_if_corr') else ''
-                    
-                    # DEBUG для первых нескольких записей
-                    if i < 5:
-                        print(f"DEBUG Citing Work {i}: {citing_doi}")
-                        print(f"  - used_for_sc: {usage_info.get('used_for_sc')} -> {used_for_sc}")
-                        print(f"  - used_for_sc_corr: {usage_info.get('used_for_sc_corr')} -> {used_for_sc_corr}")
-                        print(f"  - used_for_if: {usage_info.get('used_for_if')} -> {used_for_if}")
-                        print(f"  - used_for_if_corr: {usage_info.get('used_for_if_corr')} -> {used_for_if_corr}")
                     
                     citing_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -2949,23 +2900,15 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
                         'Work_Type': safe_convert(cr.get('type', ''))[:50],
-                        # ИСПРАВЛЕНИЕ: Используем прямые значения флагов
-                        'Used for SC': used_for_sc,
-                        'Used for SC_corr': used_for_sc_corr,
-                        'Used for IF': used_for_if,
-                        'Used for IF_corr': used_for_if_corr
+                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
+                        'Used for SC_corr': '×' if usage_info.get('used_for_sc_corr') else '',
+                        'Used for IF': '×' if usage_info.get('used_for_if') else '',
+                        'Used for IF_corr': '×' if usage_info.get('used_for_if_corr') else ''
                     })
             
             if citing_list:
                 citing_df = pd.DataFrame(citing_list)
                 citing_df.to_excel(writer, sheet_name='Citing_Works', index=False)
-                
-                # DEBUG: Show summary of flags in the final DataFrame
-                st.write(f"📊 DEBUG: Final citing works DataFrame flags:")
-                st.write(f"  - Used for SC: {len(citing_df[citing_df['Used for SC'] == '×'])}")
-                st.write(f"  - Used for SC_corr: {len(citing_df[citing_df['Used for SC_corr'] == '×'])}")
-                st.write(f"  - Used for IF: {len(citing_df[citing_df['Used for IF'] == '×'])}")
-                st.write(f"  - Used for IF_corr: {len(citing_df[citing_df['Used for IF_corr'] == '×'])}")
 
             # Sheet 3: Overlaps between analyzed and citing works
             overlap_list = []
