@@ -19,6 +19,7 @@ import os
 import random
 import seaborn as sns
 import matplotlib.pyplot as plt
+from typing import List, Tuple
 
 # Import translation manager
 from languages import translation_manager
@@ -4207,3 +4208,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
