@@ -3984,16 +3984,15 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
                 )
 
 # === 19. Main Analysis Function ===
-def analyze_journal(issn, period_str):
+def analyze_journal(issn, period_str, special_analysis=False):
     global delayer
     delayer = AdaptiveDelayer()
     
     state = get_analysis_state()
     state.analysis_complete = False
     
-    # Check if this is Special Analysis based on period
-    # Special Analysis is defined as period "1580-120" or similar
-    state.is_special_analysis = "1580" in period_str and "120" in period_str
+    # Set Special Analysis mode based on checkbox
+    state.is_special_analysis = special_analysis
     
     # Load metrics data at the start
     load_metrics_data()
@@ -4002,13 +4001,24 @@ def analyze_journal(issn, period_str):
     overall_progress = st.progress(0)
     overall_status = st.empty()
     
-    # Period parsing
+    # Period parsing - use fixed dates for Special Analysis
     overall_status.text(translation_manager.get_text('parsing_period'))
-    years = parse_period(period_str)
-    if not years:
-        return
-    from_date = f"{min(years)}-01-01"
-    until_date = f"{max(years)}-12-31"
+    
+    if state.is_special_analysis:
+        # Use fixed dates for Special Analysis: current date -1580 days to current date -120 days
+        current_date = datetime.now()
+        from_date = (current_date - timedelta(days=1580)).strftime('%Y-%m-%d')
+        until_date = (current_date - timedelta(days=120)).strftime('%Y-%m-%d')
+        years = [current_date.year - 4, current_date.year - 3, current_date.year - 2, current_date.year - 1]
+        st.info(f"🔬 Special Analysis Mode: Using fixed period {from_date} to {until_date}")
+    else:
+        # Normal period parsing
+        years = parse_period(period_str)
+        if not years:
+            return
+        from_date = f"{min(years)}-01-01"
+        until_date = f"{max(years)}-12-31"
+    
     overall_progress.progress(0.1)
     
     # Journal name
@@ -4274,11 +4284,23 @@ def main():
             help=glossary.get_tooltip('ISSN')
         )
         
+        # Special Analysis checkbox
+        special_analysis = st.checkbox(
+            "🎯 Special Analysis Mode", 
+            value=False,
+            help="Calculate CiteScore and Impact Factor metrics using fixed time windows (current date -1580 days to current date -120 days)"
+        )
+        
+        # Period input - disabled when Special Analysis is active
         period = st.text_input(
             translation_manager.get_text('analysis_period'),
             value="2022-2025",
-            help=translation_manager.get_text('period_examples')
+            help=translation_manager.get_text('period_examples'),
+            disabled=special_analysis
         )
+        
+        if special_analysis:
+            st.info("🔬 Special Analysis Mode: Using fixed period for CiteScore & Impact Factor calculation")
         
         st.markdown("---")
         st.header("📚 " + translation_manager.get_text('dictionary_of_terms'))
@@ -4363,12 +4385,12 @@ def main():
                 st.error(translation_manager.get_text('issn_required'))
                 return
                 
-            if not period:
+            if not period and not special_analysis:
                 st.error(translation_manager.get_text('period_required'))
                 return
                 
             with st.spinner(translation_manager.get_text('analysis_starting')):
-                analyze_journal(issn, period)
+                analyze_journal(issn, period, special_analysis)
     
     with col2:
         st.subheader("📤 " + translation_manager.get_text('results'))
@@ -4412,7 +4434,7 @@ def main():
             results['overlap_details'],
             results.get('fast_metrics', {}),
             results.get('additional_data', {}),
-            results.get('special_analysis_metrics', {}).get('is_special_analysis', False) or getattr(state, 'is_special_analysis', False)
+            getattr(state, 'is_special_analysis', False) or results.get('special_analysis_metrics', {}).get('is_special_analysis', False)
         )
         
         # Detailed statistics
@@ -4721,6 +4743,3 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
-
-
-
