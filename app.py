@@ -2675,6 +2675,31 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     
     total_citations_processed = 0
     
+    # === ИСПРАВЛЕНИЕ: Явная инициализация citing_works_usage для всех уникальных цитирующих DOI перед циклом ===
+    unique_citing_dois = set()
+    for analyzed in analyzed_metadata:
+        if analyzed and analyzed.get('crossref'):
+            analyzed_doi = analyzed['crossref'].get('DOI')
+            if analyzed_doi:
+                citings = state.citing_cache.get(analyzed_doi, [])
+                for citing in citings:
+                    citing_doi = citing.get('doi')
+                    if citing_doi:
+                        unique_citing_dois.add(citing_doi)
+    
+    for citing_doi in unique_citing_dois:
+        if citing_doi not in citing_works_usage:
+            citing_works_usage[citing_doi] = {
+                'used_for_sc': False,
+                'used_for_sc_corr': False, 
+                'used_for_if': False,
+                'used_for_if_corr': False,
+                'cs_citations_count': 0,  # Number of CiteScore citations from this work
+                'if_citations_count': 0,  # Number of Impact Factor citations from this work
+                'publication_date': None  # Will be set later if needed
+            }
+    # === КОНЕЦ ИСПРАВЛЕНИЯ ===
+    
     for analyzed in analyzed_metadata:
         if not analyzed or not analyzed.get('crossref'):
             continue
@@ -4864,5 +4889,3 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
-
-
