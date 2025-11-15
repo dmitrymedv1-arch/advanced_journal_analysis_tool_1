@@ -2596,12 +2596,16 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             except:
                 pass
         
-        # For CiteScore, all articles in Special Analysis are counted (B)
-        B += 1
+        # Initialize usage tracking for this analyzed article
         analyzed_articles_usage[analyzed_doi] = {
-            'used_for_sc': True,  # All articles in Special Analysis are used for SC
-            'used_for_if': False  # Will be set below for IF calculation
+            'used_for_sc': False,
+            'used_for_if': False
         }
+        
+        # For CiteScore, all articles in Special Analysis are counted (B)
+        if pub_date and (cs_start_date <= pub_date <= cs_end_date):
+            B += 1
+            analyzed_articles_usage[analyzed_doi]['used_for_sc'] = True
         
         # Check if this article should be used for Impact Factor (D)
         if pub_date and (if_analyzed_start <= pub_date <= if_analyzed_end):
@@ -2641,7 +2645,7 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             if not citing_doi:
                 continue
             
-            # Initialize usage tracking for this citing work
+            # Initialize usage tracking for this citing work if not exists
             if citing_doi not in citing_works_usage:
                 citing_works_usage[citing_doi] = {
                     'used_for_sc': False,
@@ -4743,3 +4747,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
