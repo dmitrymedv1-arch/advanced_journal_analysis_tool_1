@@ -2488,16 +2488,24 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     
     # Initialize counters
     B = 0  # Articles for CiteScore (all in Special Analysis)
-    A = 0  # All citations for CiteScore
-    C = 0  # Citations from Scopus-indexed journals for CiteScore
+    A = 0  # All citations for CiteScore (COUNTING EACH CITATION)
+    C = 0  # Citations from Scopus-indexed journals for CiteScore (COUNTING EACH CITATION)
     
     D = 0  # Articles for Impact Factor
-    E = 0  # All citations for Impact Factor  
-    F = 0  # Citations from WoS-indexed journals for Impact Factor
+    E = 0  # All citations for Impact Factor (COUNTING EACH CITATION) 
+    F = 0  # Citations from WoS-indexed journals for Impact Factor (COUNTING EACH CITATION)
     
     # Track which articles and citations are used for metrics (for Excel reporting)
     analyzed_articles_usage = {}
     citing_works_usage = {}
+    
+    # Detailed citation tracking - count each citation separately
+    citation_details = {
+        'cs_citations': [],  # List of (analyzed_doi, citing_doi) for CiteScore
+        'cs_scopus_citations': [],  # List of (analyzed_doi, citing_doi) for Scopus-corrected CiteScore
+        'if_citations': [],  # List of (analyzed_doi, citing_doi) for Impact Factor
+        'if_wos_citations': []  # List of (analyzed_doi, citing_doi) for WoS-corrected Impact Factor
+    }
     
     # Load metrics data for ISSN validation
     load_metrics_data()
@@ -2594,7 +2602,7 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
         
         return False
     
-    # Process analyzed articles for CiteScore (B)
+    # Process analyzed articles for CiteScore (B) and Impact Factor (D)
     for analyzed in analyzed_metadata:
         if not analyzed or not analyzed.get('crossref'):
             continue
@@ -2619,10 +2627,12 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
         # Initialize usage tracking for this analyzed article
         analyzed_articles_usage[analyzed_doi] = {
             'used_for_sc': False,
-            'used_for_if': False
+            'used_for_if': False,
+            'cs_citations_count': 0,  # Number of citations for CiteScore
+            'if_citations_count': 0   # Number of citations for Impact Factor
         }
         
-        # For CiteScore, all articles in Special Analysis are counted (B)
+        # For CiteScore, all articles in Special Analysis period are counted (B)
         if pub_date and (cs_start_date <= pub_date <= cs_end_date):
             B += 1
             analyzed_articles_usage[analyzed_doi]['used_for_sc'] = True
@@ -2632,7 +2642,7 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             D += 1
             analyzed_articles_usage[analyzed_doi]['used_for_if'] = True
     
-    # Process citing works and citations
+    # Process citing works and citations - COUNT EACH CITATION SEPARATELY
     for analyzed in analyzed_metadata:
         if not analyzed or not analyzed.get('crossref'):
             continue
@@ -2671,7 +2681,9 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                     'used_for_sc': False,
                     'used_for_sc_corr': False, 
                     'used_for_if': False,
-                    'used_for_if_corr': False
+                    'used_for_if_corr': False,
+                    'cs_citations_count': 0,  # Number of CiteScore citations from this work
+                    'if_citations_count': 0   # Number of Impact Factor citations from this work
                 }
             
             # Get citing work publication date
@@ -2683,29 +2695,39 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                 except:
                     pass
             
-            # CiteScore calculations (A and C)
+            # CiteScore calculations (A and C) - COUNT EACH CITATION
             if (citing_pub_date and (cs_start_date <= citing_pub_date <= cs_end_date) and
                 analyzed_pub_date and (cs_start_date <= analyzed_pub_date <= cs_end_date)):
                 
+                # Count this citation for CiteScore
                 A += 1
                 citing_works_usage[citing_doi]['used_for_sc'] = True
+                citing_works_usage[citing_doi]['cs_citations_count'] += 1
+                analyzed_articles_usage[analyzed_doi]['cs_citations_count'] += 1
+                citation_details['cs_citations'].append((analyzed_doi, citing_doi))
                 
                 # Check if citing work is in Scopus
                 if is_in_scopus(citing):
                     C += 1
                     citing_works_usage[citing_doi]['used_for_sc_corr'] = True
+                    citation_details['cs_scopus_citations'].append((analyzed_doi, citing_doi))
             
-            # Impact Factor calculations (E and F)
+            # Impact Factor calculations (E and F) - COUNT EACH CITATION
             if (citing_pub_date and (if_citing_start <= citing_pub_date <= if_citing_end) and
                 analyzed_pub_date and (if_analyzed_start <= analyzed_pub_date <= if_analyzed_end)):
                 
+                # Count this citation for Impact Factor
                 E += 1
                 citing_works_usage[citing_doi]['used_for_if'] = True
+                citing_works_usage[citing_doi]['if_citations_count'] += 1
+                analyzed_articles_usage[analyzed_doi]['if_citations_count'] += 1
+                citation_details['if_citations'].append((analyzed_doi, citing_doi))
                 
                 # Check if citing work is in WoS
                 if is_in_wos(citing):
                     F += 1
                     citing_works_usage[citing_doi]['used_for_if_corr'] = True
+                    citation_details['if_wos_citations'].append((analyzed_doi, citing_doi))
     
     # Calculate final metrics
     special_metrics['cite_score'] = round(A / B, 3) if B > 0 else 0
@@ -2722,7 +2744,12 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
         'E': E,
         'F': F,
         'analyzed_articles_usage': analyzed_articles_usage,
-        'citing_works_usage': citing_works_usage
+        'citing_works_usage': citing_works_usage,
+        'citation_details': citation_details,
+        'total_cs_citations': len(citation_details['cs_citations']),
+        'total_cs_scopus_citations': len(citation_details['cs_scopus_citations']),
+        'total_if_citations': len(citation_details['if_citations']),
+        'total_if_wos_citations': len(citation_details['if_wos_citations'])
     }
     
     return special_metrics
@@ -4764,5 +4791,6 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
