@@ -2486,12 +2486,17 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     if_citing_start = current_date - timedelta(days=534)
     if_citing_end = current_date - timedelta(days=170)
     
+    print(f"🔍 Special Analysis Date Windows:")
+    print(f"   CiteScore: {cs_start_date.date()} to {cs_end_date.date()}")
+    print(f"   IF Analyzed: {if_analyzed_start.date()} to {if_analyzed_end.date()}")
+    print(f"   IF Citing: {if_citing_start.date()} to {if_citing_end.date()}")
+    
     # Initialize counters
-    B = 0  # Articles for CiteScore (all in Special Analysis)
+    B = 0  # Articles for CiteScore (published in CS window)
     A = 0  # All citations for CiteScore (COUNTING EACH CITATION)
     C = 0  # Citations from Scopus-indexed journals for CiteScore (COUNTING EACH CITATION)
     
-    D = 0  # Articles for Impact Factor
+    D = 0  # Articles for Impact Factor (published in IF window)
     E = 0  # All citations for Impact Factor (COUNTING EACH CITATION) 
     F = 0  # Citations from WoS-indexed journals for Impact Factor (COUNTING EACH CITATION)
     
@@ -2501,24 +2506,43 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     
     # Detailed citation tracking - count each citation separately
     citation_details = {
-        'cs_citations': [],  # List of (analyzed_doi, citing_doi) for CiteScore
-        'cs_scopus_citations': [],  # List of (analyzed_doi, citing_doi) for Scopus-corrected CiteScore
-        'if_citations': [],  # List of (analyzed_doi, citing_doi) for Impact Factor
-        'if_wos_citations': []  # List of (analyzed_doi, citing_doi) for WoS-corrected Impact Factor
+        'cs_citations': [],  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for CiteScore
+        'cs_scopus_citations': [],  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for Scopus-corrected CiteScore
+        'if_citations': [],  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for Impact Factor
+        'if_wos_citations': []  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for WoS-corrected Impact Factor
     }
     
     # Load metrics data for ISSN validation
     load_metrics_data()
     
-    # Helper function to check if a date falls within a window
-    def is_date_in_window(date_str, start_date, end_date):
-        if not date_str:
-            return False
-        try:
-            article_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-            return start_date <= article_date <= end_date
-        except:
-            return False
+    # Helper function to extract publication date from metadata
+    def get_publication_date(metadata):
+        """Extract publication date from metadata (Crossref or OpenAlex)"""
+        if not metadata:
+            return None
+            
+        # Try Crossref first
+        cr = metadata.get('crossref')
+        if cr:
+            date_parts = cr.get('published', {}).get('date-parts', [[]])[0]
+            if date_parts and len(date_parts) >= 1:
+                try:
+                    year = date_parts[0]
+                    month = date_parts[1] if len(date_parts) > 1 else 1
+                    day = date_parts[2] if len(date_parts) > 2 else 1
+                    return datetime(year, month, day)
+                except:
+                    pass
+        
+        # Try OpenAlex
+        oa = metadata.get('openalex')
+        if oa and oa.get('publication_date'):
+            try:
+                return datetime.fromisoformat(oa['publication_date'].replace('Z', '+00:00'))
+            except:
+                pass
+                
+        return None
     
     # Helper function to check if citing work is in Scopus (CS.xlsx)
     def is_in_scopus(citing_work):
@@ -2534,7 +2558,7 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             cr_issns = cr.get('ISSN', [])
             if isinstance(cr_issns, str):
                 cr_issns = [cr_issns]
-            issns.extend(cr_issns)
+            issns.extend([issn for issn in cr_issns if issn])
         
         if oa:
             host_venue = oa.get('host_venue', {})
@@ -2542,10 +2566,10 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                 oa_issns = host_venue.get('issn', [])
                 if isinstance(oa_issns, str):
                     oa_issns = [oa_issns]
-                issns.extend(oa_issns)
+                issns.extend([issn for issn in oa_issns if issn])
         
         # Check each ISSN against CS data
-        for issn in issns:
+        for issn in set(issns):  # Remove duplicates
             if not issn:
                 continue
                 
@@ -2557,6 +2581,7 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                     (state.cs_data['E-ISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn)
                 ]
                 if not cs_match.empty:
+                    print(f"✅ Found in Scopus: {issn} -> {normalized_issn}")
                     return True
         
         return False
@@ -2575,7 +2600,7 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             cr_issns = cr.get('ISSN', [])
             if isinstance(cr_issns, str):
                 cr_issns = [cr_issns]
-            issns.extend(cr_issns)
+            issns.extend([issn for issn in cr_issns if issn])
         
         if oa:
             host_venue = oa.get('host_venue', {})
@@ -2583,10 +2608,10 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                 oa_issns = host_venue.get('issn', [])
                 if isinstance(oa_issns, str):
                     oa_issns = [oa_issns]
-                issns.extend(oa_issns)
+                issns.extend([issn for issn in oa_issns if issn])
         
         # Check each ISSN against IF data
-        for issn in issns:
+        for issn in set(issns):  # Remove duplicates
             if not issn:
                 continue
                 
@@ -2598,11 +2623,14 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                     (state.if_data['eISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn)
                 ]
                 if not if_match.empty:
+                    print(f"✅ Found in WoS: {issn} -> {normalized_issn}")
                     return True
         
         return False
     
-    # Process analyzed articles for CiteScore (B) and Impact Factor (D)
+    # Step 1: Process analyzed articles for CiteScore (B) and Impact Factor (D)
+    print(f"📊 Processing {len(analyzed_metadata)} analyzed articles...")
+    
     for analyzed in analyzed_metadata:
         if not analyzed or not analyzed.get('crossref'):
             continue
@@ -2612,37 +2640,37 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             continue
             
         # Get publication date
-        pub_date = None
-        cr = analyzed['crossref']
-        date_parts = cr.get('published', {}).get('date-parts', [[]])[0]
-        if date_parts and len(date_parts) >= 1:
-            try:
-                year = date_parts[0]
-                month = date_parts[1] if len(date_parts) > 1 else 1
-                day = date_parts[2] if len(date_parts) > 2 else 1
-                pub_date = datetime(year, month, day)
-            except:
-                pass
+        analyzed_pub_date = get_publication_date(analyzed)
         
         # Initialize usage tracking for this analyzed article
         analyzed_articles_usage[analyzed_doi] = {
             'used_for_sc': False,
             'used_for_if': False,
             'cs_citations_count': 0,  # Number of citations for CiteScore
-            'if_citations_count': 0   # Number of citations for Impact Factor
+            'if_citations_count': 0,  # Number of citations for Impact Factor
+            'publication_date': analyzed_pub_date
         }
         
-        # For CiteScore, all articles in Special Analysis period are counted (B)
-        if pub_date and (cs_start_date <= pub_date <= cs_end_date):
+        # Check if this article should be used for CiteScore (B)
+        if analyzed_pub_date and (cs_start_date <= analyzed_pub_date <= cs_end_date):
             B += 1
             analyzed_articles_usage[analyzed_doi]['used_for_sc'] = True
+            print(f"✅ Article {analyzed_doi} included in CiteScore (published: {analyzed_pub_date.date()})")
         
         # Check if this article should be used for Impact Factor (D)
-        if pub_date and (if_analyzed_start <= pub_date <= if_analyzed_end):
+        if analyzed_pub_date and (if_analyzed_start <= analyzed_pub_date <= if_analyzed_end):
             D += 1
             analyzed_articles_usage[analyzed_doi]['used_for_if'] = True
+            print(f"✅ Article {analyzed_doi} included in Impact Factor (published: {analyzed_pub_date.date()})")
     
-    # Process citing works and citations - COUNT EACH CITATION SEPARATELY
+    print(f"📈 Articles for CiteScore (B): {B}")
+    print(f"📈 Articles for Impact Factor (D): {D}")
+    
+    # Step 2: Process citing works and citations - COUNT EACH CITATION SEPARATELY
+    print(f"🔍 Processing citations for {len(analyzed_metadata)} analyzed articles...")
+    
+    total_citations_processed = 0
+    
     for analyzed in analyzed_metadata:
         if not analyzed or not analyzed.get('crossref'):
             continue
@@ -2652,18 +2680,10 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             continue
             
         # Get analyzed article publication date
-        analyzed_pub_date = None
-        cr = analyzed['crossref']
-        date_parts = cr.get('published', {}).get('date-parts', [[]])[0]
-        if date_parts and len(date_parts) >= 1:
-            try:
-                year = date_parts[0]
-                month = date_parts[1] if len(date_parts) > 1 else 1
-                day = date_parts[2] if len(date_parts) > 2 else 1
-                analyzed_pub_date = datetime(year, month, day)
-            except:
-                pass
-        
+        analyzed_pub_date = get_publication_date(analyzed)
+        if not analyzed_pub_date:
+            continue
+            
         # Get citing works for this analyzed article
         citings = state.citing_cache.get(analyzed_doi, [])
         
@@ -2675,6 +2695,21 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             if not citing_doi:
                 continue
             
+            total_citations_processed += 1
+            
+            # Get citing work publication date
+            citing_pub_date = None
+            citing_pub_date_str = citing.get('pub_date')
+            if citing_pub_date_str:
+                try:
+                    citing_pub_date = datetime.fromisoformat(citing_pub_date_str.replace('Z', '+00:00'))
+                except:
+                    # Try to get from OpenAlex data
+                    citing_pub_date = get_publication_date(citing)
+            
+            if not citing_pub_date:
+                continue
+            
             # Initialize usage tracking for this citing work if not exists
             if citing_doi not in citing_works_usage:
                 citing_works_usage[citing_doi] = {
@@ -2683,51 +2718,52 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                     'used_for_if': False,
                     'used_for_if_corr': False,
                     'cs_citations_count': 0,  # Number of CiteScore citations from this work
-                    'if_citations_count': 0   # Number of Impact Factor citations from this work
+                    'if_citations_count': 0,  # Number of Impact Factor citations from this work
+                    'publication_date': citing_pub_date
                 }
             
-            # Get citing work publication date
-            citing_pub_date_str = citing.get('pub_date')
-            citing_pub_date = None
-            if citing_pub_date_str:
-                try:
-                    citing_pub_date = datetime.fromisoformat(citing_pub_date_str.replace('Z', '+00:00'))
-                except:
-                    pass
-            
             # CiteScore calculations (A and C) - COUNT EACH CITATION
-            if (citing_pub_date and (cs_start_date <= citing_pub_date <= cs_end_date) and
-                analyzed_pub_date and (cs_start_date <= analyzed_pub_date <= cs_end_date)):
-                
+            # BOTH analyzed article AND citing work must be in CiteScore period
+            analyzed_in_cs = (cs_start_date <= analyzed_pub_date <= cs_end_date)
+            citing_in_cs = (cs_start_date <= citing_pub_date <= cs_end_date)
+            
+            if analyzed_in_cs and citing_in_cs:
                 # Count this citation for CiteScore
                 A += 1
                 citing_works_usage[citing_doi]['used_for_sc'] = True
                 citing_works_usage[citing_doi]['cs_citations_count'] += 1
                 analyzed_articles_usage[analyzed_doi]['cs_citations_count'] += 1
-                citation_details['cs_citations'].append((analyzed_doi, citing_doi))
+                citation_details['cs_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
                 
                 # Check if citing work is in Scopus
                 if is_in_scopus(citing):
                     C += 1
                     citing_works_usage[citing_doi]['used_for_sc_corr'] = True
-                    citation_details['cs_scopus_citations'].append((analyzed_doi, citing_doi))
+                    citation_details['cs_scopus_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
             
             # Impact Factor calculations (E and F) - COUNT EACH CITATION
-            if (citing_pub_date and (if_citing_start <= citing_pub_date <= if_citing_end) and
-                analyzed_pub_date and (if_analyzed_start <= analyzed_pub_date <= if_analyzed_end)):
-                
+            # Analyzed article in IF publication window, citing work in IF citation window
+            analyzed_in_if_pub = (if_analyzed_start <= analyzed_pub_date <= if_analyzed_end)
+            citing_in_if_cite = (if_citing_start <= citing_pub_date <= if_citing_end)
+            
+            if analyzed_in_if_pub and citing_in_if_cite:
                 # Count this citation for Impact Factor
                 E += 1
                 citing_works_usage[citing_doi]['used_for_if'] = True
                 citing_works_usage[citing_doi]['if_citations_count'] += 1
                 analyzed_articles_usage[analyzed_doi]['if_citations_count'] += 1
-                citation_details['if_citations'].append((analyzed_doi, citing_doi))
+                citation_details['if_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
                 
                 # Check if citing work is in WoS
                 if is_in_wos(citing):
                     F += 1
                     citing_works_usage[citing_doi]['used_for_if_corr'] = True
-                    citation_details['if_wos_citations'].append((analyzed_doi, citing_doi))
+                    citation_details['if_wos_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
+    
+    print(f"📊 Citation Processing Complete:")
+    print(f"   Total citations processed: {total_citations_processed}")
+    print(f"   CiteScore: A={A}, C={C}, B={B}")
+    print(f"   Impact Factor: E={E}, F={F}, D={D}")
     
     # Calculate final metrics
     special_metrics['cite_score'] = round(A / B, 2) if B > 0 else 0
@@ -2749,8 +2785,13 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
         'total_cs_citations': len(citation_details['cs_citations']),
         'total_cs_scopus_citations': len(citation_details['cs_scopus_citations']),
         'total_if_citations': len(citation_details['if_citations']),
-        'total_if_wos_citations': len(citation_details['if_wos_citations'])
+        'total_if_wos_citations': len(citation_details['if_wos_citations']),
+        'total_citations_processed': total_citations_processed
     }
+    
+    print(f"🎯 Final Metrics:")
+    print(f"   CiteScore: {special_metrics['cite_score']} (Corrected: {special_metrics['cite_score_corrected']})")
+    print(f"   Impact Factor: {special_metrics['impact_factor']} (Corrected: {special_metrics['impact_factor_corrected']})")
     
     return special_metrics
 
@@ -4791,6 +4832,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
