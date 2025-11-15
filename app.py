@@ -471,7 +471,8 @@ def get_citing_dois_and_metadata(args):
                 resp = requests.get(f"{url}&cursor={cursor}", timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
-                    for w in data.get('results', []):
+                    new_items = data.get('results', [])  # Определяем new_items здесь
+                    for w in new_items:
                         c_doi = w.get('doi')
                         if c_doi:
                             if c_doi not in state.crossref_cache:
@@ -493,7 +494,7 @@ def get_citing_dois_and_metadata(args):
             delayer.wait(success=False)
         if not success:
             break
-        if not new_items:
+        if not new_items:  # Теперь new_items определена
             break
     state.citing_cache[analyzed_doi] = citing_list
     return citing_list
@@ -585,13 +586,14 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
     while cursor:
         params['cursor'] = cursor
         success = False
+        new_items = []  # Определяем new_items здесь
         for _ in range(RETRIES):
             try:
                 rate_limiter.wait_if_needed()
                 resp = requests.get(base_url, params=params, timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
-                    new_items = data['message']['items']
+                    new_items = data['message']['items']  # Присваиваем значение
                     items.extend(new_items)
                     cursor = data['message'].get('next-cursor')
                     
@@ -608,7 +610,7 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
             delayer.wait(success=False)
         if not success:
             break
-        if not new_items:
+        if not new_items:  # Теперь new_items определена
             break
     
     progress_bar.progress(1.0)
@@ -4858,3 +4860,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
