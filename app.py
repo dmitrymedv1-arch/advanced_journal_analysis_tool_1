@@ -54,6 +54,7 @@ class AnalysisState:
         self.excel_buffer = None
         self.if_data = None
         self.cs_data = None
+        self.is_special_analysis = False  # New flag for Special Analysis mode
 
 # --- Terms Dictionary ---
 class JournalAnalysisGlossary:
@@ -470,8 +471,7 @@ def get_citing_dois_and_metadata(args):
                 resp = requests.get(f"{url}&cursor={cursor}", timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
-                    new_items = data.get('results', [])  # Определяем new_items здесь
-                    for w in new_items:
+                    for w in data.get('results', []):
                         c_doi = w.get('doi')
                         if c_doi:
                             if c_doi not in state.crossref_cache:
@@ -492,8 +492,6 @@ def get_citing_dois_and_metadata(args):
                 pass
             delayer.wait(success=False)
         if not success:
-            break
-        if not new_items:  # Теперь new_items определена
             break
     state.citing_cache[analyzed_doi] = citing_list
     return citing_list
@@ -585,14 +583,13 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
     while cursor:
         params['cursor'] = cursor
         success = False
-        new_items = []  # Определяем new_items здесь
         for _ in range(RETRIES):
             try:
                 rate_limiter.wait_if_needed()
                 resp = requests.get(base_url, params=params, timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
-                    new_items = data['message']['items']  # Присваиваем значение
+                    new_items = data['message']['items']
                     items.extend(new_items)
                     cursor = data['message'].get('next-cursor')
                     
@@ -609,7 +606,7 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
             delayer.wait(success=False)
         if not success:
             break
-        if not new_items:  # Теперь new_items определена
+        if not new_items:
             break
     
     progress_bar.progress(1.0)
@@ -2237,7 +2234,7 @@ class TitleKeywordsAnalyzer:
         return filtered_compounds
 
     def extract_scientific_stopwords(self, text: str) -> List[str]:
-        """Извлекает научные ��топ-слова"""
+        """Извлекает научные стоп-слова"""
         if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
             return []
 
@@ -2455,8 +2452,351 @@ def normalize_keywords_data(keywords_data):
     
     return normalized_data
 
+# === NEW FUNCTION FOR SPECIAL ANALYSIS METRICS ===
+def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state):
+    """Calculate CiteScore and Impact Factor metrics for Special Analysis mode"""
+    
+    # Initialize metrics with default values
+    special_metrics = {
+        'cite_score': 0,
+        'cite_score_corrected': 0,
+        'impact_factor': 0,
+        'impact_factor_corrected': 0,
+        'debug_info': {}
+    }
+    
+    # Check if we're in Special Analysis mode
+    if not state.is_special_analysis:
+        return special_metrics
+    
+    # Get current date for time window calculations
+    current_date = datetime.now()
+    
+    # Define time windows for Special Analysis
+    # CiteScore windows (1580 to 120 days ago)
+    cs_start_date = current_date - timedelta(days=1580)
+    cs_end_date = current_date - timedelta(days=120)
+    
+    # Impact Factor windows
+    # Analyzed articles: 1265 to 535 days ago
+    if_analyzed_start = current_date - timedelta(days=1265)
+    if_analyzed_end = current_date - timedelta(days=535)
+    
+    # Citing works: 534 to 170 days ago  
+    if_citing_start = current_date - timedelta(days=534)
+    if_citing_end = current_date - timedelta(days=170)
+    
+    print(f"🔍 Special Analysis Date Windows:")
+    print(f"   CiteScore: {cs_start_date.date()} to {cs_end_date.date()}")
+    print(f"   IF Analyzed: {if_analyzed_start.date()} to {if_analyzed_end.date()}")
+    print(f"   IF Citing: {if_citing_start.date()} to {if_citing_end.date()}")
+    
+    # Initialize counters
+    B = 0  # Articles for CiteScore (published in CS window)
+    A = 0  # All citations for CiteScore (COUNTING EACH CITATION)
+    C = 0  # Citations from Scopus-indexed journals for CiteScore (COUNTING EACH CITATION)
+    
+    D = 0  # Articles for Impact Factor (published in IF window)
+    E = 0  # All citations for Impact Factor (COUNTING EACH CITATION) 
+    F = 0  # Citations from WoS-indexed journals for Impact Factor (COUNTING EACH CITATION)
+    
+    # Track which articles and citations are used for metrics (for Excel reporting)
+    analyzed_articles_usage = {}
+    citing_works_usage = {}
+    
+    # Detailed citation tracking - count each citation separately
+    citation_details = {
+        'cs_citations': [],  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for CiteScore
+        'cs_scopus_citations': [],  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for Scopus-corrected CiteScore
+        'if_citations': [],  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for Impact Factor
+        'if_wos_citations': []  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for WoS-corrected Impact Factor
+    }
+    
+    # Load metrics data for ISSN validation
+    load_metrics_data()
+    
+    # Helper function to extract publication date from metadata
+    def get_publication_date(metadata):
+        """Extract publication date from metadata (Crossref or OpenAlex)"""
+        if not metadata:
+            return None
+            
+        # Try Crossref first
+        cr = metadata.get('crossref')
+        if cr:
+            date_parts = cr.get('published', {}).get('date-parts', [[]])[0]
+            if date_parts and len(date_parts) >= 1:
+                try:
+                    year = date_parts[0]
+                    month = date_parts[1] if len(date_parts) > 1 else 1
+                    day = date_parts[2] if len(date_parts) > 2 else 1
+                    return datetime(year, month, day)
+                except:
+                    pass
+        
+        # Try OpenAlex
+        oa = metadata.get('openalex')
+        if oa and oa.get('publication_date'):
+            try:
+                return datetime.fromisoformat(oa['publication_date'].replace('Z', '+00:00'))
+            except:
+                pass
+                
+        return None
+    
+    # Helper function to check if citing work is in Scopus (CS.xlsx)
+    def is_in_scopus(citing_work):
+        if not citing_work:
+            return False
+        
+        # Extract ISSNs from citing work
+        issns = []
+        cr = citing_work.get('crossref')
+        oa = citing_work.get('openalex')
+        
+        if cr:
+            cr_issns = cr.get('ISSN', [])
+            if isinstance(cr_issns, str):
+                cr_issns = [cr_issns]
+            issns.extend([issn for issn in cr_issns if issn])
+        
+        if oa:
+            host_venue = oa.get('host_venue', {})
+            if host_venue:
+                oa_issns = host_venue.get('issn', [])
+                if isinstance(oa_issns, str):
+                    oa_issns = [oa_issns]
+                issns.extend([issn for issn in oa_issns if issn])
+        
+        # Check each ISSN against CS data
+        for issn in set(issns):  # Remove duplicates
+            if not issn:
+                continue
+                
+            normalized_issn = normalize_issn_for_comparison(issn)
+            if not state.cs_data.empty:
+                # Check against Print ISSN and E-ISSN columns in CS data
+                cs_match = state.cs_data[
+                    (state.cs_data['Print ISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn) |
+                    (state.cs_data['E-ISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn)
+                ]
+                if not cs_match.empty:
+                    print(f"✅ Found in Scopus: {issn} -> {normalized_issn}")
+                    return True
+        
+        return False
+    
+    # Helper function to check if citing work is in WoS (IF.xlsx)
+    def is_in_wos(citing_work):
+        if not citing_work:
+            return False
+        
+        # Extract ISSNs from citing work
+        issns = []
+        cr = citing_work.get('crossref')
+        oa = citing_work.get('openalex')
+        
+        if cr:
+            cr_issns = cr.get('ISSN', [])
+            if isinstance(cr_issns, str):
+                cr_issns = [cr_issns]
+            issns.extend([issn for issn in cr_issns if issn])
+        
+        if oa:
+            host_venue = oa.get('host_venue', {})
+            if host_venue:
+                oa_issns = host_venue.get('issn', [])
+                if isinstance(oa_issns, str):
+                    oa_issns = [oa_issns]
+                issns.extend([issn for issn in oa_issns if issn])
+        
+        # Check each ISSN against IF data
+        for issn in set(issns):  # Remove duplicates
+            if not issn:
+                continue
+                
+            normalized_issn = normalize_issn_for_comparison(issn)
+            if not state.if_data.empty:
+                # Check against ISSN and eISSN columns in IF data
+                if_match = state.if_data[
+                    (state.if_data['ISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn) |
+                    (state.if_data['eISSN'].fillna('').astype(str).apply(normalize_issn_for_comparison) == normalized_issn)
+                ]
+                if not if_match.empty:
+                    print(f"✅ Found in WoS: {issn} -> {normalized_issn}")
+                    return True
+        
+        return False
+    
+    # Step 1: Process analyzed articles for CiteScore (B) and Impact Factor (D)
+    print(f"📊 Processing {len(analyzed_metadata)} analyzed articles...")
+    
+    for analyzed in analyzed_metadata:
+        if not analyzed or not analyzed.get('crossref'):
+            continue
+            
+        analyzed_doi = analyzed['crossref'].get('DOI')
+        if not analyzed_doi:
+            continue
+            
+        # Get publication date
+        analyzed_pub_date = get_publication_date(analyzed)
+        
+        # Initialize usage tracking for this analyzed article
+        analyzed_articles_usage[analyzed_doi] = {
+            'used_for_sc': False,
+            'used_for_if': False,
+            'cs_citations_count': 0,  # Number of citations for CiteScore
+            'if_citations_count': 0,  # Number of citations for Impact Factor
+            'publication_date': analyzed_pub_date
+        }
+        
+        # Check if this article should be used for CiteScore (B)
+        if analyzed_pub_date and (cs_start_date <= analyzed_pub_date <= cs_end_date):
+            B += 1
+            analyzed_articles_usage[analyzed_doi]['used_for_sc'] = True
+            print(f"✅ Article {analyzed_doi} included in CiteScore (published: {analyzed_pub_date.date()})")
+        
+        # Check if this article should be used for Impact Factor (D)
+        if analyzed_pub_date and (if_analyzed_start <= analyzed_pub_date <= if_analyzed_end):
+            D += 1
+            analyzed_articles_usage[analyzed_doi]['used_for_if'] = True
+            print(f"✅ Article {analyzed_doi} included in Impact Factor (published: {analyzed_pub_date.date()})")
+    
+    print(f"📈 Articles for CiteScore (B): {B}")
+    print(f"📈 Articles for Impact Factor (D): {D}")
+    
+    # Step 2: Process citing works and citations - COUNT EACH CITATION SEPARATELY
+    print(f"🔍 Processing citations for {len(analyzed_metadata)} analyzed articles...")
+    
+    total_citations_processed = 0
+    
+    for analyzed in analyzed_metadata:
+        if not analyzed or not analyzed.get('crossref'):
+            continue
+            
+        analyzed_doi = analyzed['crossref'].get('DOI')
+        if not analyzed_doi:
+            continue
+            
+        # Get analyzed article publication date
+        analyzed_pub_date = get_publication_date(analyzed)
+        if not analyzed_pub_date:
+            continue
+            
+        # Get citing works for this analyzed article
+        citings = state.citing_cache.get(analyzed_doi, [])
+        
+        for citing in citings:
+            if not citing:
+                continue
+                
+            citing_doi = citing.get('doi')
+            if not citing_doi:
+                continue
+            
+            total_citations_processed += 1
+            
+            # Get citing work publication date
+            citing_pub_date = None
+            citing_pub_date_str = citing.get('pub_date')
+            if citing_pub_date_str:
+                try:
+                    citing_pub_date = datetime.fromisoformat(citing_pub_date_str.replace('Z', '+00:00'))
+                except:
+                    # Try to get from OpenAlex data
+                    citing_pub_date = get_publication_date(citing)
+            
+            if not citing_pub_date:
+                continue
+            
+            # Initialize usage tracking for this citing work if not exists
+            if citing_doi not in citing_works_usage:
+                citing_works_usage[citing_doi] = {
+                    'used_for_sc': False,
+                    'used_for_sc_corr': False, 
+                    'used_for_if': False,
+                    'used_for_if_corr': False,
+                    'cs_citations_count': 0,  # Number of CiteScore citations from this work
+                    'if_citations_count': 0,  # Number of Impact Factor citations from this work
+                    'publication_date': citing_pub_date
+                }
+            
+            # CiteScore calculations (A and C) - COUNT EACH CITATION
+            # BOTH analyzed article AND citing work must be in CiteScore period
+            analyzed_in_cs = (cs_start_date <= analyzed_pub_date <= cs_end_date)
+            citing_in_cs = (cs_start_date <= citing_pub_date <= cs_end_date)
+            
+            if analyzed_in_cs and citing_in_cs:
+                # Count this citation for CiteScore
+                A += 1
+                citing_works_usage[citing_doi]['used_for_sc'] = True
+                citing_works_usage[citing_doi]['cs_citations_count'] += 1
+                analyzed_articles_usage[analyzed_doi]['cs_citations_count'] += 1
+                citation_details['cs_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
+                
+                # Check if citing work is in Scopus
+                if is_in_scopus(citing):
+                    C += 1
+                    citing_works_usage[citing_doi]['used_for_sc_corr'] = True
+                    citation_details['cs_scopus_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
+            
+            # Impact Factor calculations (E and F) - COUNT EACH CITATION
+            # Analyzed article in IF publication window, citing work in IF citation window
+            analyzed_in_if_pub = (if_analyzed_start <= analyzed_pub_date <= if_analyzed_end)
+            citing_in_if_cite = (if_citing_start <= citing_pub_date <= if_citing_end)
+            
+            if analyzed_in_if_pub and citing_in_if_cite:
+                # Count this citation for Impact Factor
+                E += 1
+                citing_works_usage[citing_doi]['used_for_if'] = True
+                citing_works_usage[citing_doi]['if_citations_count'] += 1
+                analyzed_articles_usage[analyzed_doi]['if_citations_count'] += 1
+                citation_details['if_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
+                
+                # Check if citing work is in WoS
+                if is_in_wos(citing):
+                    F += 1
+                    citing_works_usage[citing_doi]['used_for_if_corr'] = True
+                    citation_details['if_wos_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
+    
+    print(f"📊 Citation Processing Complete:")
+    print(f"   Total citations processed: {total_citations_processed}")
+    print(f"   CiteScore: A={A}, C={C}, B={B}")
+    print(f"   Impact Factor: E={E}, F={F}, D={D}")
+    
+    # Calculate final metrics
+    special_metrics['cite_score'] = round(A / B, 2) if B > 0 else 0
+    special_metrics['cite_score_corrected'] = round(C / B, 2) if B > 0 else 0
+    special_metrics['impact_factor'] = round(E / D, 2) if D > 0 else 0
+    special_metrics['impact_factor_corrected'] = round(F / D, 2) if D > 0 else 0
+    
+    # Store debug information
+    special_metrics['debug_info'] = {
+        'B': B,
+        'A': A, 
+        'C': C,
+        'D': D,
+        'E': E,
+        'F': F,
+        'analyzed_articles_usage': analyzed_articles_usage,
+        'citing_works_usage': citing_works_usage,
+        'citation_details': citation_details,
+        'total_cs_citations': len(citation_details['cs_citations']),
+        'total_cs_scopus_citations': len(citation_details['cs_scopus_citations']),
+        'total_if_citations': len(citation_details['if_citations']),
+        'total_if_wos_citations': len(citation_details['if_wos_citations']),
+        'total_citations_processed': total_citations_processed
+    }
+    
+    print(f"🎯 Final Metrics:")
+    print(f"   CiteScore: {special_metrics['cite_score']} (Corrected: {special_metrics['cite_score_corrected']})")
+    print(f"   Impact Factor: {special_metrics['impact_factor']} (Corrected: {special_metrics['impact_factor_corrected']})")
+    
+    return special_metrics
+
 # === 17. Enhanced Excel Report Creation ===
-def create_enhanced_excel_report(journal_results, excel_buffer):
+def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
     """Create enhanced Excel report with error handling for large data"""
 
     def safe_convert(value):
@@ -2480,154 +2820,634 @@ def create_enhanced_excel_report(journal_results, excel_buffer):
         cleaned = [str(x).strip() for x in items if x is not None and str(x).strip()]
         result = sep.join(cleaned)
         return result[:max_len] if max_len else result
-        
+            
     try:
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            # Comparative Statistics sheet for all journals
-            comparative_data = []
-            journal_names = list(journal_results.keys())
+            # Sheet 1: Analyzed articles (with optimization)
+            analyzed_list = []
+            MAX_ROWS = 50000  # Limit for large data
             
-            # Define metrics for comparison
-            metrics = [
-                'n_items', 'total_citations', 'h_index', 'avg_citations_per_article',
-                'self_cites_pct', 'multi_country_pct', 'unique_affiliations_count',
-                'unique_countries_count', 'ref_mean', 'auth_mean'
-            ]
+            # Get special analysis metrics if available
+            state = get_analysis_state()
+            special_metrics = additional_data.get('special_analysis_metrics', {})
+            analyzed_articles_usage = special_metrics.get('debug_info', {}).get('analyzed_articles_usage', {})
             
-            for journal_name in journal_names:
-                result = journal_results[journal_name]
-                analyzed_stats = result['analyzed_stats']
-                enhanced_stats = result['enhanced_stats']
+            for i, item in enumerate(analyzed_data):
+                if i >= MAX_ROWS:
+                    break
+                if item and item.get('crossref'):
+                    cr = item['crossref']
+                    oa = item.get('openalex', {})
+                    authors_list, affiliations_list, countries_list = extract_affiliations_and_countries(oa)
+                    journal_info = extract_journal_info(item)
+                    
+                    analyzed_doi = cr.get('DOI', '')
+                    usage_info = analyzed_articles_usage.get(analyzed_doi, {})
+                    
+                    analyzed_list.append({
+                        'DOI': safe_convert(cr.get('DOI', ''))[:100],
+                        'Title': (cr.get('title', [''])[0] if cr.get('title') else 'No title')[:200],
+                        'Authors_Crossref': safe_join([f"{a.get('given', '')} {a.get('family', '')}".strip() for a in cr.get('author', []) if a.get('given') or a.get('family')])[:300],
+                        'Authors_OpenAlex': safe_join(authors_list)[:300],
+                        'Affiliations': safe_join(affiliations_list)[:500],
+                        'Countries': safe_join(countries_list)[:100],
+                        'Publication_Year': safe_convert(cr.get('published', {}).get('date-parts', [[0]])[0][0]),
+                        'Journal': safe_convert(journal_info['journal_name'])[:100],
+                        'Publisher': safe_convert(journal_info['publisher'])[:100],
+                        'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],
+                        'Reference_Count': safe_convert(cr.get('reference-count', 0)),
+                        'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
+                        'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
+                        'Author_Count': safe_convert(len(cr.get('author', []))),
+                        'Work_Type': safe_convert(cr.get('type', ''))[:50],
+                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
+                        'Used for IF': '×' if usage_info.get('used_for_if') else ''
+                    })
+            
+            if analyzed_list:
+                analyzed_df = pd.DataFrame(analyzed_list)
+                analyzed_df.to_excel(writer, sheet_name='Analyzed_Articles', index=False)
+
+            # Sheet 2: Citing works (with optimization)
+            citing_list = []
+            citing_works_usage = special_metrics.get('debug_info', {}).get('citing_works_usage', {})
+            
+            for i, item in enumerate(citing_data):
+                if i >= MAX_ROWS:
+                    break
+                if item and item.get('crossref'):
+                    cr = item['crossref']
+                    oa = item.get('openalex', {})
+                    authors_list, affiliations_list, countries_list = extract_affiliations_and_countries(oa)
+                    journal_info = extract_journal_info(item)
+                    
+                    citing_doi = cr.get('DOI', '')
+                    usage_info = citing_works_usage.get(citing_doi, {})
+                    
+                    citing_list.append({
+                        'DOI': safe_convert(cr.get('DOI', ''))[:100],
+                        'Title': (cr.get('title', [''])[0] if cr.get('title') else 'No title')[:200],
+                        'Authors_Crossref': safe_join([f"{a.get('given', '')} {a.get('family', '')}".strip() for a in cr.get('author', []) if a.get('given') or a.get('family')])[:300],
+                        'Authors_OpenAlex': safe_join(authors_list)[:300],
+                        'Affiliations': safe_join(affiliations_list)[:500],
+                        'Countries': safe_join(countries_list)[:100],
+                        'Publication_Year': safe_convert(cr.get('published', {}).get('date-parts', [[0]])[0][0]),
+                        'Journal': safe_convert(journal_info['journal_name'])[:100],
+                        'Publisher': safe_convert(journal_info['publisher'])[:100],
+                        'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],
+                        'Reference_Count': safe_convert(cr.get('reference-count', 0)),
+                        'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
+                        'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
+                        'Author_Count': safe_convert(len(cr.get('author', []))),
+                        'Work_Type': safe_convert(cr.get('type', ''))[:50],
+                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
+                        'Used for SC_corr': '×' if usage_info.get('used_for_sc_corr') else '',
+                        'Used for IF': '×' if usage_info.get('used_for_if') else '',
+                        'Used for IF_corr': '×' if usage_info.get('used_for_if_corr') else ''
+                    })
+            
+            if citing_list:
+                citing_df = pd.DataFrame(citing_list)
+                citing_df.to_excel(writer, sheet_name='Citing_Works', index=False)
+
+            # Sheet 3: Overlaps between analyzed and citing works
+            overlap_list = []
+            for overlap in overlap_details:
+                overlap_list.append({
+                    'Analyzed_DOI': safe_convert(overlap['analyzed_doi'])[:100],
+                    'Citing_DOI': safe_convert(overlap['citing_doi'])[:100],
+                    'Common_Authors': safe_join(overlap['common_authors'])[:300],
+                    'Common_Authors_Count': safe_convert(overlap['common_authors_count']),
+                    'Common_Affiliations': safe_join(overlap['common_affiliations'])[:500],
+                    'Common_Affiliations_Count': safe_convert(overlap['common_affiliations_count'])
+                })
+            
+            if overlap_list:
+                overlap_df = pd.DataFrame(overlap_list)
+                overlap_df.to_excel(writer, sheet_name='Work_Overlaps', index=False)
+
+            # Sheet 4: Time to first citation (С ИСКЛЮЧЕНИЕМ РЕДАКТОРСКИХ ЗАМЕТОК)
+            first_citation_list = []
+            for detail in citation_timing.get('first_citation_details', []):
+                # === ИСКЛЮЧЕНИЕ РЕДАКТОРСКИХ ЗАМЕТОК ===
+                # Не включаем записи с тем же префиксом и той же датой
+                if detail.get('same_prefix', False) and detail.get('same_date', False):
+                    continue
+                    
+                first_citation_list.append({
+                    'Analyzed_DOI': safe_convert(detail['analyzed_doi'])[:100],
+                    'First_Citing_DOI': safe_convert(detail['citing_doi'])[:100],
+                    'Publication_Date': detail['analyzed_date'].strftime('%Y-%m-%d') if detail['analyzed_date'] else 'N/A',
+                    'First_Citation_Date': detail['first_citation_date'].strftime('%Y-%m-%d') if detail['first_citation_date'] else 'N/A',
+                    'Days_to_First_Citation': safe_convert(detail['days_to_first_citation']),
+                    'Same_DOI_Prefix': detail.get('same_prefix', False),
+                    'Same_Publication_Date': detail.get('same_date', False)
+                })
+            
+            if first_citation_list:
+                first_citation_df = pd.DataFrame(first_citation_list)
+                first_citation_df.to_excel(writer, sheet_name='First_Citations', index=False)
+
+            # Sheet 5: Combined Statistics (NEW - объединенный лист)
+            statistics_data = {
+                'Metric': [
+                    'Total Articles', 
+                    'Total References', 
+                    'References with DOI', 'References with DOI Count', 'References with DOI Percentage',
+                    'References without DOI', 'References without DOI Count', 'References without DOI Percentage',
+                    'Self-Citations', 'Self-Citations Count', 'Self-Citations Percentage',
+                    'Single Author Articles',
+                    'Articles with >10 Authors', 
+                    'Minimum References', 
+                    'Maximum References', 
+                    'Average References',
+                    'Median References', 
+                    'Minimum Authors',
+                    'Maximum Authors', 
+                    'Average Authors',
+                    'Median Authors', 
+                    'Single Country Articles', 'Single Country Articles Percentage',
+                    'Multiple Country Articles', 'Multiple Country Articles Percentage',
+                    'No Country Data Articles', 'No Country Data Articles Percentage',
+                    'Total Affiliations',
+                    'Unique Affiliations', 
+                    'Unique Countries',
+                    'Unique Journals',
+                    'Unique Publishers',
+                    'Articles with ≥10 citations',
+                    'Articles with ≥20 citations',
+                    'Articles with ≥30 citations',
+                    'Articles with ≥50 citations'
+                ],
+                'Value_Analyzed': [
+                    safe_convert(analyzed_stats['n_items']),
+                    safe_convert(analyzed_stats['total_refs']),
+                    'References with DOI', safe_convert(analyzed_stats['refs_with_doi']), f"{safe_convert(analyzed_stats['refs_with_doi_pct']):.1f}%",
+                    'References without DOI', safe_convert(analyzed_stats['refs_without_doi']), f"{safe_convert(analyzed_stats['refs_without_doi_pct']):.1f}%",
+                    'Self-Citations', safe_convert(analyzed_stats['self_cites']), f"{safe_convert(analyzed_stats['self_cites_pct']):.1f}%",
+                    safe_convert(analyzed_stats['single_authors']),
+                    safe_convert(analyzed_stats['multi_authors_gt10']),
+                    safe_convert(analyzed_stats['ref_min']),
+                    safe_convert(analyzed_stats['ref_max']),
+                    f"{safe_convert(analyzed_stats['ref_mean']):.1f}",
+                    safe_convert(analyzed_stats['ref_median']),
+                    safe_convert(analyzed_stats['auth_min']),
+                    safe_convert(analyzed_stats['auth_max']),
+                    f"{safe_convert(analyzed_stats['auth_mean']):.1f}",
+                    safe_convert(analyzed_stats['auth_median']),
+                    safe_convert(analyzed_stats['single_country_articles']), f"{safe_convert(analyzed_stats['single_country_pct']):.1f}%",
+                    safe_convert(analyzed_stats['multi_country_articles']), f"{safe_convert(analyzed_stats['multi_country_pct']):.1f}%",
+                    safe_convert(analyzed_stats['no_country_articles']), f"{safe_convert(analyzed_stats['no_country_pct']):.1f}%",
+                    safe_convert(analyzed_stats['total_affiliations_count']),
+                    safe_convert(analyzed_stats['unique_affiliations_count']),
+                    safe_convert(analyzed_stats['unique_countries_count']),
+                    safe_convert(analyzed_stats['unique_journals_count']),
+                    safe_convert(analyzed_stats['unique_publishers_count']),
+                    safe_convert(analyzed_stats['articles_with_10_citations']),
+                    safe_convert(analyzed_stats['articles_with_20_citations']),
+                    safe_convert(analyzed_stats['articles_with_30_citations']),
+                    safe_convert(analyzed_stats['articles_with_50_citations'])
+                ],
+                'Value_Citing': [
+                    safe_convert(citing_stats['n_items']),
+                    safe_convert(citing_stats['total_refs']),
+                    'References with DOI', safe_convert(citing_stats['refs_with_doi']), f"{safe_convert(citing_stats['refs_with_doi_pct']):.1f}%",
+                    'References without DOI', safe_convert(citing_stats['refs_without_doi']), f"{safe_convert(citing_stats['refs_without_doi_pct']):.1f}%",
+                    'Self-Citations', safe_convert(citing_stats['self_cites']), f"{safe_convert(citing_stats['self_cites_pct']):.1f}%",
+                    safe_convert(citing_stats['single_authors']),
+                    safe_convert(citing_stats['multi_authors_gt10']),
+                    safe_convert(citing_stats['ref_min']),
+                    safe_convert(citing_stats['ref_max']),
+                    f"{safe_convert(citing_stats['ref_mean']):.1f}",
+                    safe_convert(citing_stats['ref_median']),
+                    safe_convert(citing_stats['auth_min']),
+                    safe_convert(citing_stats['auth_max']),
+                    f"{safe_convert(citing_stats['auth_mean']):.1f}",
+                    safe_convert(citing_stats['auth_median']),
+                    safe_convert(citing_stats['single_country_articles']), f"{safe_convert(citing_stats['single_country_pct']):.1f}%",
+                    safe_convert(citing_stats['multi_country_articles']), f"{safe_convert(citing_stats['multi_country_pct']):.1f}%",
+                    safe_convert(citing_stats['no_country_articles']), f"{safe_convert(citing_stats['no_country_pct']):.1f}%",
+                    safe_convert(citing_stats['total_affiliations_count']),
+                    safe_convert(citing_stats['unique_affiliations_count']),
+                    safe_convert(citing_stats['unique_countries_count']),
+                    safe_convert(citing_stats['unique_journals_count']),
+                    safe_convert(citing_stats['unique_publishers_count']),
+                    'N/A',  # Articles with ≥10 citations (для цитирующих не применимо)
+                    'N/A',  # Articles with ≥20 citations
+                    'N/A',  # Articles with ≥30 citations
+                    'N/A'   # Articles with ≥50 citations
+                ]
+            }
+            statistics_df = pd.DataFrame(statistics_data)
+            statistics_df.to_excel(writer, sheet_name='Statistics', index=False)
+
+            # Sheet 6: Combined Citing Stats (NEW - объединенный лист Enhanced_Statistics и Citation_Timing)
+            citing_stats_data = {
+                'Metric': [
+                    'H-index', 'Total Citations',
+                    'Average Citations per Article', 'Maximum Citations',
+                    'Minimum Citations', 'Articles with Citations',
+                    'Articles without Citations',
+                    'Minimum Days to First Citation',
+                    'Maximum Days to First Citation', 
+                    'Average Days to First Citation',
+                    'Median Days to First Citation', 
+                    'Articles with Citation Timing Data',
+                    'Total Years Covered by Citation Data'
+                ],
+                'Value': [
+                    safe_convert(enhanced_stats['h_index']),
+                    safe_convert(enhanced_stats['total_citations']),
+                    f"{safe_convert(enhanced_stats['avg_citations_per_article']):.1f}",
+                    safe_convert(enhanced_stats['max_citations']),
+                    safe_convert(enhanced_stats['min_citations']),
+                    safe_convert(enhanced_stats['articles_with_citations']),
+                    safe_convert(enhanced_stats['articles_without_citations']),
+                    safe_convert(citation_timing['days_min']),
+                    safe_convert(citation_timing['days_max']),
+                    f"{safe_convert(citation_timing['days_mean']):.1f}",
+                    safe_convert(citation_timing['days_median']),
+                    safe_convert(citation_timing['articles_with_timing_data']),
+                    safe_convert(citation_timing['total_years_covered'])
+                ]
+            }
+            citing_stats_df = pd.DataFrame(citing_stats_data)
+            citing_stats_df.to_excel(writer, sheet_name='Citing_Stats', index=False)
+
+            # Sheet 7: Citations by year
+            yearly_citations_data = []
+            for yearly_stat in citation_timing['yearly_citations']:
+                yearly_citations_data.append({
+                    'Year': safe_convert(yearly_stat['year']),
+                    'Citations_Count': safe_convert(yearly_stat['citations_count'])
+                })
+            
+            if yearly_citations_data:
+                yearly_citations_df = pd.DataFrame(yearly_citations_data)
+                yearly_citations_df.to_excel(writer, sheet_name='Citations_by_Year', index=False)
+
+            # Sheet 8: Citation accumulation curves (СОРТИРОВКА ПО ГОДАМ)
+            accumulation_data = []
+            for pub_year, curve_data in citation_timing['accumulation_curves'].items():
+                for data_point in curve_data:
+                    accumulation_data.append({
+                        'Publication_Year': safe_convert(pub_year),
+                        'Years_Since_Publication': safe_convert(data_point['years_since_publication']),
+                        'Cumulative_Citations': safe_convert(data_point['cumulative_citations'])
+                    })
+            
+            # === СОРТИРОВКА: сначала по году публикации, затем по годам после публикации ===
+            if accumulation_data:
+                accumulation_df = pd.DataFrame(accumulation_data)
+                accumulation_df = accumulation_df.sort_values(['Publication_Year', 'Years_Since_Publication'])
+                accumulation_df.to_excel(writer, sheet_name='Citation_Accumulation_Curves', index=False)
+
+            # Sheet 9: Citation network (СОРТИРОВКА ПО ГОДАМ)
+            citation_network_data = []
+            for year, citing_years in enhanced_stats.get('citation_network', {}).items():
+                year_counts = Counter(citing_years)
+                for citing_year, count in year_counts.items():
+                    citation_network_data.append({
+                        'Publication_Year': safe_convert(year),
+                        'Citation_Year': safe_convert(citing_year),
+                        'Citations_Count': safe_convert(count)
+                    })
+            
+            # === СОРТИРОВКА: сначала по году публикации, затем по году цитирования ===
+            if citation_network_data:
+                citation_network_df = pd.DataFrame(citation_network_data)
+                citation_network_df = citation_network_df.sort_values(['Publication_Year', 'Citation_Year'])
+                citation_network_df.to_excel(writer, sheet_name='Citation_Network', index=False)
+
+            # Sheet 10: All authors analyzed (with percentages) - С НОРМАЛИЗАЦИЕЙ ИМЕН
+            if analyzed_stats['all_authors']:
+                all_authors_data = []
+                total_articles = safe_convert(analyzed_stats['n_items'])
                 
-                row = {'Journal': journal_name}
-                for metric in metrics:
-                    if metric in analyzed_stats:
-                        row[metric] = safe_convert(analyzed_stats[metric])
-                    elif metric in enhanced_stats:
-                        row[metric] = safe_convert(enhanced_stats[metric])
-                    else:
-                        row[metric] = 0
-                comparative_data.append(row)
-            
-            if comparative_data:
-                comparative_df = pd.DataFrame(comparative_data)
-                comparative_df.to_excel(writer, sheet_name='Comparative_Statistics', index=False)
+                # Нормализуем имена авторов и объединяем счетчики
+                normalized_author_counts = Counter()
+                for author, count in analyzed_stats['all_authors']:
+                    normalized_name = normalize_author_name(author)
+                    normalized_author_counts[normalized_name] += count
+                
+                for author, count in normalized_author_counts.most_common():
+                    percentage = (safe_convert(count) / total_articles * 100) if total_articles > 0 else 0
+                    all_authors_data.append({
+                        'Author': safe_convert(author),
+                        'Articles_Count': safe_convert(count),
+                        'Percentage': round(percentage, 2)
+                    })
+                all_authors_df = pd.DataFrame(all_authors_data)
+                all_authors_df.to_excel(writer, sheet_name='All_Authors_Analyzed', index=False)
 
-            # Individual sheets for each journal (simplified)
-            MAX_ROWS = 10000  # Reduced for multiple journals
-            for journal_name in journal_names:
-                result = journal_results[journal_name]
-                analyzed_metadata = result['analyzed_metadata']
-                all_citing_metadata = result['all_citing_metadata']
-                analyzed_stats = result['analyzed_stats']
-                citing_stats = result['citing_stats']
-                enhanced_stats = result['enhanced_stats']
-                citation_timing = result['citation_timing']
-                overlap_details = result['overlap_details']
+            # Sheet 11: All authors citing (with percentages) - С НОРМАЛИЗАЦИЕЙ ИМЕН
+            if citing_stats['all_authors']:
+                all_citing_authors_data = []
+                total_citing_articles = safe_convert(citing_stats['n_items'])
+                
+                # Нормализуем имена авторов и объединяем счетчики
+                normalized_author_counts = Counter()
+                for author, count in citing_stats['all_authors']:
+                    normalized_name = normalize_author_name(author)
+                    normalized_author_counts[normalized_name] += count
+                
+                for author, count in normalized_author_counts.most_common():
+                    percentage = (safe_convert(count) / total_citing_articles * 100) if total_citing_articles > 0 else 0
+                    all_citing_authors_data.append({
+                        'Author': safe_convert(author),
+                        'Articles_Count': safe_convert(count),
+                        'Percentage': round(percentage, 2)
+                    })
+                all_citing_authors_df = pd.DataFrame(all_citing_authors_data)
+                all_citing_authors_df.to_excel(writer, sheet_name='All_Authors_Citing', index=False)
 
-                # Sheet for analyzed articles (per journal)
-                analyzed_list = []
-                for i, item in enumerate(analyzed_metadata):
-                    if i >= MAX_ROWS:
-                        break
-                    if item and item.get('crossref'):
-                        cr = item['crossref']
-                        oa = item.get('openalex', {})
-                        authors_list, affiliations_list, countries_list = extract_affiliations_and_countries(oa)
-                        journal_info = extract_journal_info(item)
-                        
-                        analyzed_list.append({
-                            'DOI': safe_convert(cr.get('DOI', ''))[:100],
-                            'Title': (cr.get('title', [''])[0] if cr.get('title') else 'No title')[:200],
-                            'Authors': safe_join([f"{a.get('given', '')} {a.get('family', '')}".strip() for a in cr.get('author', []) if a.get('given') or a.get('family')])[:300],
-                            'Affiliations': safe_join(affiliations_list)[:500],
-                            'Countries': safe_join(countries_list)[:100],
-                            'Publication_Year': safe_convert(cr.get('published', {}).get('date-parts', [[0]])[0][0]),
-                            'Journal': safe_convert(journal_info['journal_name'])[:100],
-                            'Publisher': safe_convert(journal_info['publisher'])[:100],
-                            'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],
-                            'Reference_Count': safe_convert(cr.get('reference-count', 0)),
-                            'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
-                            'Author_Count': safe_convert(len(cr.get('author', []))),
-                            'Work_Type': safe_convert(cr.get('type', ''))[:50]
+            # Sheet 12: All affiliations analyzed (with percentages)
+            if analyzed_stats['all_affiliations']:
+                all_affiliations_data = []
+                total_mentions = sum(safe_convert(count) for _, count in analyzed_stats['all_affiliations'])
+                for affiliation, count in analyzed_stats['all_affiliations']:
+                    percentage = (safe_convert(count) / total_mentions * 100) if total_mentions > 0 else 0
+                    all_affiliations_data.append({
+                        'Affiliation': safe_convert(affiliation),
+                        'Mentions_Count': safe_convert(count),
+                        'Percentage': round(percentage, 2)
+                    })
+                all_affiliations_df = pd.DataFrame(all_affiliations_data)
+                all_affiliations_df.to_excel(writer, sheet_name='All_Affiliations_Analyzed', index=False)
+
+            # Sheet 13: All affiliations citing (with percentages)
+            if citing_stats['all_affiliations']:
+                all_citing_affiliations_data = []
+                total_mentions = sum(safe_convert(count) for _, count in citing_stats['all_affiliations'])
+                for affiliation, count in citing_stats['all_affiliations']:
+                    percentage = (safe_convert(count) / total_mentions * 100) if total_mentions > 0 else 0
+                    all_citing_affiliations_data.append({
+                        'Affiliation': safe_convert(affiliation),
+                        'Mentions_Count': safe_convert(count),
+                        'Percentage': round(percentage, 2)
+                    })
+                all_citing_affiliations_df = pd.DataFrame(all_citing_affiliations_data)
+                all_citing_affiliations_df.to_excel(writer, sheet_name='All_Affiliations_Citing', index=False)
+
+            # Sheet 14: All countries analyzed (with percentages)
+            if analyzed_stats['all_countries']:
+                all_countries_data = []
+                total_mentions = sum(safe_convert(count) for _, count in analyzed_stats['all_countries'])
+                for country, count in analyzed_stats['all_countries']:
+                    percentage = (safe_convert(count) / total_mentions * 100) if total_mentions > 0 else 0
+                    all_countries_data.append({
+                        'Country': safe_convert(country),
+                        'Mentions_Count': safe_convert(count),
+                        'Percentage': round(percentage, 2)
+                    })
+                all_countries_df = pd.DataFrame(all_countries_data)
+                all_countries_df.to_excel(writer, sheet_name='All_Countries_Analyzed', index=False)
+
+            # Sheet 15: All countries citing (with percentages)
+            if citing_stats['all_countries']:
+                all_citing_countries_data = []
+                total_mentions = sum(safe_convert(count) for _, count in citing_stats['all_countries'])
+                for country, count in citing_stats['all_countries']:
+                    percentage = (safe_convert(count) / total_mentions * 100) if total_mentions > 0 else 0
+                    all_citing_countries_data.append({
+                        'Country': safe_convert(country),
+                        'Mentions_Count': safe_convert(count),
+                        'Percentage': round(percentage, 2)
+                    })
+                all_citing_countries_df = pd.DataFrame(all_citing_countries_data)
+                all_citing_countries_df.to_excel(writer, sheet_name='All_Countries_Citing', index=False)
+
+            # Sheet 16: All journals citing (with percentages) - UPDATED VERSION WITH CS DATA
+            if citing_stats['all_journals']:
+                all_citing_journals_data = []
+                total_articles = safe_convert(citing_stats['n_items'])
+                
+                # Load metrics data if not already loaded
+                if get_analysis_state().if_data is None or get_analysis_state().cs_data is None:
+                    load_metrics_data()
+                
+                for journal_info in citing_stats['all_journals']:
+                    journal_name = journal_info[0]
+                    count = journal_info[1]
+                    percentage = (safe_convert(count) / total_articles * 100) if total_articles > 0 else 0
+                    
+                    # Extract ISSNs for this journal from citing data
+                    journal_issns = []
+                    for citing_item in citing_data:
+                        if citing_item and citing_item.get('crossref'):
+                            cr = citing_item['crossref']
+                            container_title = cr.get('container-title', [''])[0] if cr.get('container-title') else ''
+                            if container_title == journal_name:
+                                issns = cr.get('ISSN', [])
+                                if issns is None:
+                                    issns = []
+                                if isinstance(issns, str):
+                                    issns = [issns]
+                                issns = [str(issn).strip() for issn in issns if issn and isinstance(issn, str)]
+                                journal_issns.extend(issns)
+                    
+                    # Remove duplicates
+                    journal_issns = list(set(journal_issns))
+                    
+                    # Get ISSNs for display
+                    issn_1 = journal_issns[0] if len(journal_issns) > 0 else ""
+                    issn_2 = journal_issns[1] if len(journal_issns) > 1 else ""
+                    
+                    # Get metrics for this journal - UPDATED WITH CS DATA
+                    metrics = get_journal_metrics(journal_issns)
+                    
+                    all_citing_journals_data.append({
+                        'Journal': safe_convert(journal_name),
+                        'ISSN_1': safe_convert(issn_1),
+                        'ISSN_2': safe_convert(issn_2),
+                        'Articles_Count': safe_convert(count),
+                        'Percentage': round(percentage, 2),
+                        '': '',  # Empty column
+                        'IF (WoS)': safe_convert(metrics['if_metrics'].get('if', '')) if metrics['if_metrics'] else '',
+                        'Q(WoS)': safe_convert(metrics['if_metrics'].get('quartile', '')) if metrics['if_metrics'] else '',
+                        'SC(Scopus)': safe_convert(metrics['cs_metrics'].get('citescore', '')) if metrics['cs_metrics'] else '',
+                        'Q(Scopus)': safe_convert(metrics['cs_metrics'].get('quartile', '')) if metrics['cs_metrics'] else ''
+                    })
+                
+                all_citing_journals_df = pd.DataFrame(all_citing_journals_data)
+                all_citing_journals_df.to_excel(writer, sheet_name='All_Journals_Citing', index=False)
+
+            # Sheet 17: All publishers citing (with percentages)
+            if citing_stats['all_publishers']:
+                all_citing_publishers_data = []
+                total_articles = safe_convert(citing_stats['n_items'])
+                for publisher, count in citing_stats['all_publishers']:
+                    percentage = (safe_convert(count) / total_articles * 100) if total_articles > 0 else 0
+                    all_citing_publishers_data.append({
+                        'Publisher': safe_convert(publisher),
+                        'Articles_Count': safe_convert(count),
+                        'Percentage': round(percentage, 2)
+                    })
+                all_citing_publishers_df = pd.DataFrame(all_citing_publishers_data)
+                all_citing_publishers_df.to_excel(writer, sheet_name='All_Publishers_Citing', index=False)
+
+            # Sheet 18: Fast metrics (NEW)
+            fast_metrics_data = {
+                'Metric': [
+                    'Reference Age (median)', 'Reference Age (mean)',
+                    'Reference Age (25-75 percentile)', 'References Analyzed',
+                    'Journal Self-Citation Rate (JSCR)', 'Journal Self-Citations',
+                    'Total Citations for JSCR',
+                    'Cited Half-Life (median)', 'Cited Half-Life (mean)',
+                    'Articles with CHL Data',
+                    'Field-Weighted Citation Impact (FWCI)', 'Total Citations',
+                    'Expected Citations',
+                    'Citation Velocity', 'Articles with Velocity Data',
+                    'OA Impact Premium', 'OA Articles', 'Non-OA Articles',
+                    'Average OA Citations', 'Average Non-OA Citations',
+                    'Elite Index', 'Elite Articles', 'Citation Threshold',
+                    'Author Gini Index', 'Total Authors',
+                    'Average Articles per Author', 'Median Articles per Author',
+                    'Diversity Balance Index (DBI)', 'Unique Concepts',
+                    'Total Concept Mentions'
+                ],
+                'Value': [
+                    safe_convert(fast_metrics.get('ref_median_age', 'N/A')),
+                    safe_convert(fast_metrics.get('ref_mean_age', 'N/A')),
+                    f"{safe_convert(fast_metrics.get('ref_ages_25_75', ['N/A', 'N/A'])[0])}-{safe_convert(fast_metrics.get('ref_ages_25_75', ['N/A', 'N/A'])[1])}",
+                    safe_convert(fast_metrics.get('total_refs_analyzed', 0)),
+                    f"{safe_convert(fast_metrics.get('JSCR', 0))}%",
+                    safe_convert(fast_metrics.get('self_cites', 0)),
+                    safe_convert(fast_metrics.get('total_cites', 0)),
+                    safe_convert(fast_metrics.get('cited_half_life_median', 'N/A')),
+                    safe_convert(fast_metrics.get('cited_half_life_mean', 'N/A')),
+                    safe_convert(fast_metrics.get('articles_with_chl', 0)),
+                    safe_convert(fast_metrics.get('FWCI', 0)),
+                    safe_convert(fast_metrics.get('total_cites', 0)),
+                    safe_convert(fast_metrics.get('expected_cites', 0)),
+                    safe_convert(fast_metrics.get('citation_velocity', 0)),
+                    safe_convert(fast_metrics.get('articles_with_velocity', 0)),
+                    f"{safe_convert(fast_metrics.get('OA_impact_premium', 0))}%",
+                    safe_convert(fast_metrics.get('OA_articles', 0)),
+                    safe_convert(fast_metrics.get('non_OA_articles', 0)),
+                    safe_convert(fast_metrics.get('OA_avg_citations', 0)),
+                    safe_convert(fast_metrics.get('non_OA_avg_citations', 0)),
+                    f"{safe_convert(fast_metrics.get('elite_index', 0))}%",
+                    safe_convert(fast_metrics.get('elite_articles', 0)),
+                    safe_convert(fast_metrics.get('citation_threshold', 0)),
+                    safe_convert(fast_metrics.get('author_gini', 0)),
+                    safe_convert(fast_metrics.get('total_authors', 0)),
+                    safe_convert(fast_metrics.get('articles_per_author_avg', 0)),
+                    safe_convert(fast_metrics.get('articles_per_author_median', 0)),
+                    safe_convert(fast_metrics.get('DBI', 0)),
+                    safe_convert(fast_metrics.get('unique_concepts', 0)),
+                    safe_convert(fast_metrics.get('total_concept_mentions', 0))
+                ]
+            }
+            fast_metrics_df = pd.DataFrame(fast_metrics_data)
+            fast_metrics_df.to_excel(writer, sheet_name='Fast_Metrics', index=False)
+
+            # Sheet 19: Top concepts (NEW) - РАСШИРЕНО ДО 10 ТЕРМИНОВ
+            if fast_metrics.get('top_concepts'):
+                top_concepts_data = {
+                    'Concept': [safe_convert(concept[0]) for concept in fast_metrics['top_concepts']],
+                    'Mentions_Count': [safe_convert(concept[1]) for concept in fast_metrics['top_concepts']]
+                }
+                top_concepts_df = pd.DataFrame(top_concepts_data)
+                top_concepts_df.to_excel(writer, sheet_name='Top_Concepts', index=False)
+
+            # === НОВЫЙ ЛИСТ: Объединенный анализ ключевых слов в названиях ===
+            # Sheet 20: Combined Title Keywords (NEW)
+            if 'title_keywords' in additional_data:
+                keywords_data = additional_data['title_keywords']
+                normalized_keywords = normalize_keywords_data(keywords_data)
+                
+                if normalized_keywords:
+                    keywords_df = pd.DataFrame(normalized_keywords)
+                    keywords_df.to_excel(writer, sheet_name='Title_Keywords', index=False)
+
+            # Sheet 21: Citation seasonality
+            if 'citation_seasonality' in additional_data:
+                seasonality_data = []
+                citation_seasonality = additional_data['citation_seasonality']
+                
+                # Citation months
+                for month in range(1, 13):
+                    month_name = datetime(2023, month, 1).strftime('%B')
+                    citation_count = safe_convert(citation_seasonality['citation_months'].get(month, 0))
+                    publication_count = safe_convert(citation_seasonality['publication_months'].get(month, 0))
+                    
+                    seasonality_data.append({
+                        'Month_Number': safe_convert(month),
+                        'Month_Name': safe_convert(month_name),
+                        'Citation_Count': citation_count,
+                        'Publication_Count': publication_count
+                    })
+                
+                if seasonality_data:
+                    seasonality_df = pd.DataFrame(seasonality_data)
+                    seasonality_df.to_excel(writer, sheet_name='Citation_Seasonality', index=False)
+
+                # Optimal publication months
+                if citation_seasonality['optimal_publication_months']:
+                    optimal_months_data = []
+                    for optimal in citation_seasonality['optimal_publication_months']:
+                        optimal_months_data.append({
+                            'High_Citation_Month': datetime(2023, safe_convert(optimal['citation_month']), 1).strftime('%B'),
+                            'Citation_Count': safe_convert(optimal['citation_count']),
+                            'Recommended_Publication_Month': datetime(2023, safe_convert(optimal['recommended_publication_month']), 1).strftime('%B'),
+                            'Reasoning': safe_convert(optimal['reasoning'])
+                        })
+                    
+                    optimal_months_df = pd.DataFrame(optimal_months_data)
+                    optimal_months_df.to_excel(writer, sheet_name='Optimal_Publication_Months', index=False)
+
+            # Sheet 22: Potential reviewers
+            if 'potential_reviewers' in additional_data:
+                reviewers_data = []
+                potential_reviewers_info = additional_data['potential_reviewers']
+                
+                for reviewer in potential_reviewers_info['potential_reviewers']:
+                    # Create separate rows for each DOI
+                    for i, doi in enumerate(reviewer['citing_dois']):
+                        reviewers_data.append({
+                            'Author': safe_convert(reviewer['author']) if i == 0 else '',  # Only show author name in first row
+                            'Citation_Count': safe_convert(reviewer['citation_count']) if i == 0 else '',
+                            'Citing_DOI': safe_convert(doi)
                         })
                 
-                if analyzed_list:
-                    analyzed_df = pd.DataFrame(analyzed_list)
-                    analyzed_df.to_excel(writer, sheet_name=f'{journal_name}_Analyzed', index=False)
+                if reviewers_data:
+                    reviewers_df = pd.DataFrame(reviewers_data)
+                    reviewers_df.to_excel(writer, sheet_name='Potential_Reviewers', index=False)
 
-                # Sheet for citing works (per journal, simplified)
-                citing_list = []
-                for i, item in enumerate(all_citing_metadata):
-                    if i >= MAX_ROWS:
-                        break
-                    if item and item.get('crossref'):
-                        cr = item['crossref']
-                        oa = item.get('openalex', {})
-                        authors_list, affiliations_list, countries_list = extract_affiliations_and_countries(oa)
-                        journal_info = extract_journal_info(item)
-                        
-                        citing_list.append({
-                            'DOI': safe_convert(cr.get('DOI', ''))[:100],
-                            'Title': (cr.get('title', [''])[0] if cr.get('title') else 'No title')[:200],
-                            'Authors': safe_join([f"{a.get('given', '')} {a.get('family', '')}".strip() for a in cr.get('author', []) if a.get('given') or a.get('family')])[:300],
-                            'Affiliations': safe_join(affiliations_list)[:500],
-                            'Countries': safe_join(countries_list)[:100],
-                            'Publication_Year': safe_convert(cr.get('published', {}).get('date-parts', [[0]])[0][0]),
-                            'Journal': safe_convert(journal_info['journal_name'])[:100],
-                            'Publisher': safe_convert(journal_info['publisher'])[:100],
-                            'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],
-                            'Reference_Count': safe_convert(cr.get('reference-count', 0)),
-                            'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
-                            'Author_Count': safe_convert(len(cr.get('author', []))),
-                            'Work_Type': safe_convert(cr.get('type', ''))[:50]
-                        })
+            # Sheet 23: Special Analysis Metrics (NEW)
+            if 'special_analysis_metrics' in additional_data:
+                special_metrics = additional_data['special_analysis_metrics']
+                debug_info = special_metrics.get('debug_info', {})
                 
-                if citing_list:
-                    citing_df = pd.DataFrame(citing_list)
-                    citing_df.to_excel(writer, sheet_name=f'{journal_name}_Citing', index=False)
-
-                # Simplified Statistics sheet per journal
-                statistics_data = {
+                special_metrics_data = {
                     'Metric': [
-                        'Total Articles', 
-                        'Total References', 
-                        'Self-Citations Percentage',
-                        'Average References',
-                        'Average Authors',
-                        'International Collaboration %',
-                        'Unique Affiliations',
-                        'Unique Countries'
+                        'CiteScore (A/B)',
+                        'CiteScore Corrected (C/B)', 
+                        'Impact Factor (E/D)',
+                        'Impact Factor Corrected (F/D)',
+                        'B (Articles for CiteScore)',
+                        'A (Citations for CiteScore)',
+                        'C (Scopus Citations for CiteScore)',
+                        'D (Articles for Impact Factor)',
+                        'E (Citations for Impact Factor)',
+                        'F (WoS Citations for Impact Factor)'
                     ],
                     'Value': [
-                        safe_convert(analyzed_stats['n_items']),
-                        safe_convert(analyzed_stats['total_refs']),
-                        f"{safe_convert(analyzed_stats['self_cites_pct']):.1f}%",
-                        f"{safe_convert(analyzed_stats['ref_mean']):.1f}",
-                        f"{safe_convert(analyzed_stats['auth_mean']):.1f}",
-                        f"{safe_convert(analyzed_stats['multi_country_pct']):.1f}%",
-                        safe_convert(analyzed_stats['unique_affiliations_count']),
-                        safe_convert(analyzed_stats['unique_countries_count'])
+                        safe_convert(special_metrics.get('cite_score', 0)),
+                        safe_convert(special_metrics.get('cite_score_corrected', 0)),
+                        safe_convert(special_metrics.get('impact_factor', 0)),
+                        safe_convert(special_metrics.get('impact_factor_corrected', 0)),
+                        safe_convert(debug_info.get('B', 0)),
+                        safe_convert(debug_info.get('A', 0)),
+                        safe_convert(debug_info.get('C', 0)),
+                        safe_convert(debug_info.get('D', 0)),
+                        safe_convert(debug_info.get('E', 0)),
+                        safe_convert(debug_info.get('F', 0))
                     ]
                 }
-                statistics_df = pd.DataFrame(statistics_data)
-                statistics_df.to_excel(writer, sheet_name=f'{journal_name}_Statistics', index=False)
-
-                # Simplified Citing Stats
-                citing_stats_data = {
-                    'Metric': [
-                        'H-index', 'Total Citations',
-                        'Average Citations per Article', 'Articles with Citations'
-                    ],
-                    'Value': [
-                        safe_convert(enhanced_stats['h_index']),
-                        safe_convert(enhanced_stats['total_citations']),
-                        f"{safe_convert(enhanced_stats['avg_citations_per_article']):.1f}",
-                        safe_convert(enhanced_stats['articles_with_citations'])
-                    ]
-                }
-                citing_stats_df = pd.DataFrame(citing_stats_data)
-                citing_stats_df.to_excel(writer, sheet_name=f'{journal_name}_Citing_Stats', index=False)
+                special_metrics_df = pd.DataFrame(special_metrics_data)
+                special_metrics_df.to_excel(writer, sheet_name='Special_Analysis_Metrics', index=False)
 
             # Ensure at least one sheet exists
             if len(writer.sheets) == 0:
@@ -2663,105 +3483,608 @@ def create_enhanced_excel_report(journal_results, excel_buffer):
             return False
 
 # === 18. Data Visualization ===
-def create_visualizations(journal_results):
+def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, additional_data, is_special_analysis=False):
     """Create visualizations for dashboard"""
     
-    # Create tabs for comparative visualization
-    tab1, tab2, tab3 = st.tabs([
+    # Create tabs for different visualization types
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         translation_manager.get_text('tab_main_metrics'), 
         translation_manager.get_text('tab_authors_organizations'), 
-        translation_manager.get_text('tab_geography')
+        translation_manager.get_text('tab_geography'), 
+        translation_manager.get_text('tab_citations'),
+        translation_manager.get_text('tab_overlaps'),
+        translation_manager.get_text('tab_citation_timing'),
+        translation_manager.get_text('tab_fast_metrics'),
+        translation_manager.get_text('tab_predictive_insights')
     ])
-    
-    journal_names = list(journal_results.keys())
     
     with tab1:
         st.subheader(translation_manager.get_text('tab_main_metrics'))
         
-        # Comparative metrics table
-        comparative_data = []
-        for journal_name in journal_names:
-            result = journal_results[journal_name]
-            analyzed_stats = result['analyzed_stats']
-            enhanced_stats = result['enhanced_stats']
+        # Check if we're in Special Analysis mode and show additional metrics
+        if is_special_analysis and 'special_analysis_metrics' in additional_data:
+            st.subheader("🎯 Special Analysis Metrics")
             
-            row = {
-                'Journal': journal_name,
-                'Total Articles': analyzed_stats['n_items'],
-                'H-index': enhanced_stats['h_index'],
-                'Total Citations': enhanced_stats['total_citations'],
-                'Avg Citations/Article': f"{enhanced_stats['avg_citations_per_article']:.1f}"
-            }
-            comparative_data.append(row)
+            special_metrics = additional_data['special_analysis_metrics']
+            debug_info = special_metrics.get('debug_info', {})
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "CiteScore", 
+                    f"{special_metrics.get('cite_score', 0):.3f}",
+                    help="A/B: Total citations (A) / Total articles (B) in Special Analysis period"
+                )
+            with col2:
+                st.metric(
+                    "CiteScore Corrected", 
+                    f"{special_metrics.get('cite_score_corrected', 0):.3f}",
+                    help="C/B: Scopus-indexed citations (C) / Total articles (B)"
+                )
+            with col3:
+                st.metric(
+                    "Impact Factor", 
+                    f"{special_metrics.get('impact_factor', 0):.3f}",
+                    help="E/D: Total citations (E) / Total articles (D) in IF calculation period"
+                )
+            with col4:
+                st.metric(
+                    "Impact Factor Corrected", 
+                    f"{special_metrics.get('impact_factor_corrected', 0):.3f}",
+                    help="F/D: WoS-indexed citations (F) / Total articles (D)"
+                )
+    
+            # Show debug information in expander
+                with st.expander("📊 Special Analysis Details", expanded=False):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**CiteScore Calculation:**")
+                        st.write(f"- B (Articles): {debug_info.get('B', 0)}")
+                        st.write(f"- A (Citations): {debug_info.get('A', 0)}")
+                        st.write(f"- C (Scopus Citations): {debug_info.get('C', 0)}")
+                        st.write(f"- CiteScore: {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = {special_metrics.get('cite_score', 0):.3f}")
+                    
+                    with col2:
+                        st.write("**Impact Factor Calculation:**")
+                        st.write(f"- D (Articles): {debug_info.get('D', 0)}")
+                        st.write(f"- E (Citations): {debug_info.get('E', 0)}")
+                        st.write(f"- F (WoS Citations): {debug_info.get('F', 0)}")
+                        st.write(f"- Impact Factor: {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = {special_metrics.get('impact_factor', 0):.3f}")
         
-        comparative_df = pd.DataFrame(comparative_data)
-        st.dataframe(comparative_df)
+        col1, col2, col3, col4 = st.columns(4)
         
-        # Bar chart for H-index comparison
-        h_indices = [journal_results[j]['enhanced_stats']['h_index'] for j in journal_names]
-        fig = go.Figure(data=[
-            go.Bar(name='H-index', x=journal_names, y=h_indices)
-        ])
-        fig.update_layout(title='H-index Comparison')
-        st.plotly_chart(fig, use_container_width=True)
+        with col1:
+            st.metric(
+                translation_manager.get_text('h_index'), 
+                enhanced_stats['h_index'],
+                help=glossary.get_tooltip('H-index')
+            )
+        with col2:
+            st.metric(
+                translation_manager.get_text('total_articles'), 
+                analyzed_stats['n_items'],
+                help=glossary.get_tooltip('Crossref')
+            )
+        with col3:
+            st.metric(
+                translation_manager.get_text('total_citations'), 
+                enhanced_stats['total_citations'],
+                help=translation_manager.get_text('total_citations_tooltip')
+            )
+        with col4:
+            st.metric(
+                translation_manager.get_text('average_citations'), 
+                f"{enhanced_stats['avg_citations_per_article']:.1f}",
+                help=translation_manager.get_text('average_citations_tooltip')
+            )
+        
+        col5, col6, col7, col8 = st.columns(4)
+        
+        with col5:
+            st.metric(
+                translation_manager.get_text('articles_with_citations'), 
+                enhanced_stats['articles_with_citations'],
+                help=translation_manager.get_text('articles_with_citations_tooltip')
+            )
+        with col6:
+            st.metric(
+                translation_manager.get_text('self_citations'), 
+                f"{analyzed_stats['self_cites_pct']:.1f}%",
+                help=glossary.get_tooltip('Self-Cites')
+            )
+        with col7:
+            st.metric(
+                translation_manager.get_text('international_articles'), 
+                f"{analyzed_stats['multi_country_pct']:.1f}%",
+                help=glossary.get_tooltip('International Collaboration')
+            )
+        with col8:
+            st.metric(
+                translation_manager.get_text('unique_affiliations'), 
+                analyzed_stats['unique_affiliations_count'],
+                help=translation_manager.get_text('unique_affiliations_tooltip')
+            )
+        
+        # Contextual tooltip for H-index
+        with st.expander("❓ " + translation_manager.get_text('what_is_h_index'), expanded=False):
+            h_info = glossary.get_detailed_info('H-index')
+            if h_info:
+                st.write(f"**{h_info['term']}** - {h_info['definition']}")
+                st.write(f"**Calculation:** {h_info['calculation']}")
+                st.write(f"**Interpretation:** {h_info['interpretation']}")
+                st.write(f"**Example:** {h_info['example']}")
+                st.write(f"**Category:** {h_info['category']}")
+        
+        # Citations by year chart
+        if citation_timing['yearly_citations']:
+            years = [item['year'] for item in citation_timing['yearly_citations']]
+            citations = [item['citations_count'] for item in citation_timing['yearly_citations']]
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=years, 
+                y=citations, 
+                name=translation_manager.get_text('citations'),
+                marker_color='lightblue'
+            ))
+            fig.update_layout(
+                title=translation_manager.get_text('citations_by_year'),
+                xaxis_title=translation_manager.get_text('year'),
+                yaxis_title=translation_manager.get_text('citations_count'),
+                showlegend=False
+            )
+            st.plotly_chart(fig, use_container_width=True)
     
     with tab2:
         st.subheader(translation_manager.get_text('tab_authors_organizations'))
         
-        # Comparative author metrics
-        author_data = []
-        for journal_name in journal_names:
-            stats = journal_results[journal_name]['analyzed_stats']
-            row = {
-                'Journal': journal_name,
-                'Avg Authors/Article': f"{stats['auth_mean']:.1f}",
-                'Unique Affiliations': stats['unique_affiliations_count']
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Top authors of analyzed articles
+            if analyzed_stats['all_authors']:
+                top_authors = analyzed_stats['all_authors'][:15]
+                authors_df = pd.DataFrame(top_authors, columns=[translation_manager.get_text('author'), translation_manager.get_text('articles')])
+                fig = px.bar(
+                    authors_df, 
+                    x=translation_manager.get_text('articles'), 
+                    y=translation_manager.get_text('author'), 
+                    orientation='h',
+                    title=translation_manager.get_text('top_15_authors_analyzed')
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Author count distribution
+            author_counts_data = {
+                translation_manager.get_text('category'): ['1 ' + translation_manager.get_text('author'), '2-5 ' + translation_manager.get_text('authors'), '6-10 ' + translation_manager.get_text('authors'), '>10 ' + translation_manager.get_text('authors')],
+                translation_manager.get_text('articles'): [
+                    analyzed_stats['single_authors'],
+                    analyzed_stats['n_items'] - analyzed_stats['single_authors'] - analyzed_stats['multi_authors_gt10'],
+                    analyzed_stats['multi_authors_gt10'],
+                    0  # Can add additional categorization
+                ]
             }
-            author_data.append(row)
+            fig = px.pie(
+                author_counts_data, 
+                values=translation_manager.get_text('articles'), 
+                names=translation_manager.get_text('category'),
+                title=translation_manager.get_text('author_count_distribution')
+            )
+            st.plotly_chart(fig, use_container_width=True)
         
-        author_df = pd.DataFrame(author_data)
-        st.dataframe(author_df)
+        # Contextual tooltip for Author Gini
+        if fast_metrics.get('author_gini', 0) > 0:
+            with st.expander("🎯 " + translation_manager.get_text('author_gini_meaning'), expanded=False):
+                gini_info = glossary.get_detailed_info('Author Gini')
+                if gini_info:
+                    st.write(f"**{translation_manager.get_text('current_value')}:** {fast_metrics['author_gini']}")
+                    st.write(f"**{translation_manager.get_text('interpretation')}:** {gini_info['interpretation']}")
+                    st.progress(min(fast_metrics['author_gini'], 1.0))
         
-        # Bar chart for average authors
-        avg_authors = [journal_results[j]['analyzed_stats']['auth_mean'] for j in journal_names]
-        fig = go.Figure(data=[
-            go.Bar(name='Avg Authors', x=journal_names, y=avg_authors)
-        ])
-        fig.update_layout(title='Average Authors per Article Comparison')
-        st.plotly_chart(fig, use_container_width=True)
+        # Top affiliations
+        if analyzed_stats['all_affiliations']:
+            top_affiliations = analyzed_stats['all_affiliations'][:10]
+            aff_df = pd.DataFrame(top_affiliations, columns=[translation_manager.get_text('affiliation'), translation_manager.get_text('mentions')])
+            fig = px.bar(
+                aff_df, 
+                x=translation_manager.get_text('mentions'), 
+                y=translation_manager.get_text('affiliation'), 
+                orientation='h',
+                title=translation_manager.get_text('top_10_affiliations_analyzed'),
+                color=translation_manager.get_text('mentions')
+            )
+            st.plotly_chart(fig, use_container_width=True)
     
     with tab3:
         st.subheader(translation_manager.get_text('tab_geography'))
         
-        # Comparative geography metrics
-        geo_data = []
-        for journal_name in journal_names:
-            stats = journal_results[journal_name]['analyzed_stats']
-            row = {
-                'Journal': journal_name,
-                'International %': f"{stats['multi_country_pct']:.1f}%",
-                'Unique Countries': stats['unique_countries_count']
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Country distribution
+            if analyzed_stats['all_countries']:
+                countries_df = pd.DataFrame(analyzed_stats['all_countries'], columns=[translation_manager.get_text('country'), translation_manager.get_text('articles')])
+                fig = px.pie(
+                    countries_df, 
+                    values=translation_manager.get_text('articles'), 
+                    names=translation_manager.get_text('country'),
+                    title=translation_manager.get_text('article_country_distribution')
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # International collaboration
+            collaboration_data = {
+                translation_manager.get_text('type'): [translation_manager.get_text('single_country'), translation_manager.get_text('multiple_countries'), translation_manager.get_text('no_data')],
+                translation_manager.get_text('articles'): [
+                    analyzed_stats['single_country_articles'],
+                    analyzed_stats['multi_country_articles'],
+                    analyzed_stats['no_country_articles']
+                ]
             }
-            geo_data.append(row)
+            fig = px.bar(
+                collaboration_data, 
+                x=translation_manager.get_text('type'), 
+                y=translation_manager.get_text('articles'),
+                title=translation_manager.get_text('international_collaboration'),
+                color=translation_manager.get_text('type')
+            )
+            st.plotly_chart(fig, use_container_width=True)
         
-        geo_df = pd.DataFrame(geo_data)
-        st.dataframe(geo_df)
+        # Contextual tooltip for international collaboration
+        with st.expander("🌐 " + translation_manager.get_text('about_international_collaboration'), expanded=False):
+            collab_info = glossary.get_detailed_info('International Collaboration')
+            if collab_info:
+                st.write(f"**{translation_manager.get_text('definition')}:** {collab_info['definition']}")
+                st.write(f"**{translation_manager.get_text('significance_for_science')}:** " + translation_manager.get_text('high_international_articles_indicator'))
+    
+    with tab4:
+        st.subheader(translation_manager.get_text('tab_citations'))
         
-        # Bar chart for international collaboration
-        int_coll = [journal_results[j]['analyzed_stats']['multi_country_pct'] for j in journal_names]
-        fig = go.Figure(data=[
-            go.Bar(name='International %', x=journal_names, y=int_coll)
-        ])
-        fig.update_layout(title='International Collaboration Comparison')
-        st.plotly_chart(fig, use_container_width=True)
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Citations by thresholds
+            citation_thresholds = {
+                translation_manager.get_text('threshold'): ['≥10', '≥20', '≥30', '≥50'],
+                translation_manager.get_text('articles'): [
+                    analyzed_stats['articles_with_10_citations'],
+                    analyzed_stats['articles_with_20_citations'],
+                    analyzed_stats['articles_with_30_citations'],
+                    analyzed_stats['articles_with_50_citations']
+                ]
+            }
+            fig = px.bar(
+                citation_thresholds, 
+                x=translation_manager.get_text('threshold'), 
+                y=translation_manager.get_text('articles'),
+                title=translation_manager.get_text('articles_by_citation_thresholds'),
+                color=translation_manager.get_text('threshold')
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Articles with/without citations
+            citation_status = {
+                translation_manager.get_text('status'): [translation_manager.get_text('with_citations'), translation_manager.get_text('without_citations')],
+                translation_manager.get_text('count'): [
+                    enhanced_stats['articles_with_citations'],
+                    enhanced_stats['articles_without_citations']
+                ]
+            }
+            fig = px.pie(
+                citation_status, 
+                values=translation_manager.get_text('count'), 
+                names=translation_manager.get_text('status'),
+                title=translation_manager.get_text('articles_by_citation_status')
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Contextual tooltip for JSCR
+        if fast_metrics.get('JSCR', 0) > 0:
+            with st.expander("🔍 " + translation_manager.get_text('jscr_explanation'), expanded=False):
+                jscr_info = glossary.get_detailed_info('JSCR')
+                if jscr_info:
+                    st.write(f"**{translation_manager.get_text('current_value')}:** {fast_metrics['JSCR']}%")
+                    st.write(f"**{translation_manager.get_text('interpretation')}:** {jscr_info['interpretation']}")
+                    
+                    # Visual indication
+                    jscr_value = fast_metrics['JSCR']
+                    if jscr_value < 10:
+                        st.success("✅ " + translation_manager.get_text('low_self_citations_excellent'))
+                    elif jscr_value < 20:
+                        st.info("ℹ️ " + translation_manager.get_text('moderate_self_citations_normal'))
+                    elif jscr_value < 30:
+                        st.warning("⚠️ " + translation_manager.get_text('elevated_self_citations_attention'))
+                    else:
+                        st.error("❌ " + translation_manager.get_text('high_self_citations_problems'))
+    
+    with tab5:
+        st.subheader(translation_manager.get_text('tab_overlaps'))
+        
+        if overlap_details:
+            # Overlap summary statistics
+            total_overlaps = len(overlap_details)
+            articles_with_overlaps = len(set([o['analyzed_doi'] for o in overlap_details]))
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric(translation_manager.get_text('total_overlaps'), total_overlaps)
+            with col2:
+                st.metric(translation_manager.get_text('articles_with_overlaps'), articles_with_overlaps)
+            with col3:
+                avg_overlaps = total_overlaps / articles_with_overlaps if articles_with_overlaps > 0 else 0
+                st.metric(translation_manager.get_text('average_overlaps_per_article'), f"{avg_overlaps:.1f}")
+            
+            # Overlap count distribution
+            overlap_counts = [o['common_authors_count'] + o['common_affiliations_count'] for o in overlap_details]
+            if overlap_counts:
+                fig = px.histogram(
+                    x=overlap_counts,
+                    title=translation_manager.get_text('overlap_count_distribution'),
+                    labels={'x': translation_manager.get_text('overlap_count'), 'y': translation_manager.get_text('frequency')}
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Overlap details table
+            st.subheader(translation_manager.get_text('overlap_details'))
+            overlap_df = pd.DataFrame(overlap_details)
+            st.dataframe(overlap_df[['analyzed_doi', 'citing_doi', 'common_authors_count', 'common_affiliations_count']])
+        else:
+            st.info(translation_manager.get_text('no_overlaps_found'))
+    
+    with tab6:
+        st.subheader(translation_manager.get_text('tab_citation_timing'))
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(translation_manager.get_text('min_days_to_citation'), citation_timing['days_min'])
+        with col2:
+            st.metric(translation_manager.get_text('max_days_to_citation'), citation_timing['days_max'])
+        with col3:
+            st.metric(translation_manager.get_text('average_days'), f"{citation_timing['days_mean']:.1f}")
+        with col4:
+            st.metric(translation_manager.get_text('median_days'), citation_timing['days_median'])
+        
+        # Contextual tooltip for Cited Half-Life
+        if fast_metrics.get('cited_half_life_median'):
+            with st.expander("⏳ " + translation_manager.get_text('cited_half_life_explanation'), expanded=False):
+                chl_info = glossary.get_detailed_info('Cited Half-Life')
+                if chl_info:
+                    st.write(f"**{translation_manager.get_text('current_value')}:** {fast_metrics['cited_half_life_median']} " + translation_manager.get_text('years'))
+                    st.write(f"**{translation_manager.get_text('definition')}:** {chl_info['definition']}")
+                    st.write(f"**{translation_manager.get_text('interpretation')}:** {chl_info['interpretation']}")
+        
+        # First citation details
+        if citation_timing['first_citation_details']:
+            st.subheader(translation_manager.get_text('first_citation_details'))
+            first_citation_df = pd.DataFrame(citation_timing['first_citation_details'])
+            st.dataframe(first_citation_df)
+            
+            # Time to first citation histogram
+            days_data = [d['days_to_first_citation'] for d in citation_timing['first_citation_details']]
+            fig = px.histogram(
+                x=days_data,
+                title=translation_manager.get_text('time_to_first_citation_distribution'),
+                labels={'x': translation_manager.get_text('days_to_first_citation'), 'y': translation_manager.get_text('article_count')}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with tab7:
+        st.subheader(translation_manager.get_text('tab_fast_metrics'))
+        
+        # Main fast metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                translation_manager.get_text('reference_age'), 
+                f"{fast_metrics.get('ref_median_age', 'N/A')} " + translation_manager.get_text('years'),
+                help=glossary.get_tooltip('Reference Age')
+            )
+        with col2:
+            st.metric(
+                translation_manager.get_text('jscr'), 
+                f"{fast_metrics.get('JSCR', 0)}%",
+                help=glossary.get_tooltip('JSCR')
+            )
+        with col3:
+            st.metric(
+                translation_manager.get_text('cited_half_life'), 
+                f"{fast_metrics.get('cited_half_life_median', 'N/A')} " + translation_manager.get_text('years'),
+                help=glossary.get_tooltip('Cited Half-Life')
+            )
+        with col4:
+            st.metric(
+                translation_manager.get_text('fwci'), 
+                fast_metrics.get('FWCI', 0),
+                help=glossary.get_tooltip('FWCI')
+            )
+        
+        col5, col6, col7, col8 = st.columns(4)
+        
+        with col5:
+            st.metric(
+                translation_manager.get_text('citation_velocity'), 
+                fast_metrics.get('citation_velocity', 0),
+                help=glossary.get_tooltip('Citation Velocity')
+            )
+        with col6:
+            st.metric(
+                translation_manager.get_text('oa_impact_premium'), 
+                f"{fast_metrics.get('OA_impact_premium', 0)}%",
+                help=glossary.get_tooltip('OA Impact Premium')
+            )
+        with col7:
+            st.metric(
+                translation_manager.get_text('elite_index'), 
+                f"{fast_metrics.get('elite_index', 0)}%",
+                help=glossary.get_tooltip('Elite Index')
+            )
+        with col8:
+            st.metric(
+                translation_manager.get_text('author_gini'), 
+                fast_metrics.get('author_gini', 0),
+                help=glossary.get_tooltip('Author Gini')
+            )
+        
+        # Detailed fast metrics information
+        st.subheader(translation_manager.get_text('fast_metrics_details'))
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Reference Age distribution
+            if fast_metrics.get('ref_median_age') is not None:
+                st.write(translation_manager.get_text('reference_age_details'))
+                st.write(translation_manager.get_text('reference_age_median').format(value=fast_metrics['ref_median_age']))
+                st.write(translation_manager.get_text('reference_age_mean').format(value=fast_metrics['ref_mean_age']))
+                st.write(translation_manager.get_text('reference_age_percentile').format(value=f"{fast_metrics['ref_ages_25_75'][0]}-{fast_metrics['ref_ages_25_75'][1]}"))
+                st.write(translation_manager.get_text('reference_age_analyzed').format(value=fast_metrics['total_refs_analyzed']))
+                
+                # Contextual tooltip
+                with st.expander("📚 " + translation_manager.get_text('more_about_reference_age'), expanded=False):
+                    ra_info = glossary.get_detailed_info('Reference Age')
+                    if ra_info:
+                        st.write(f"**{translation_manager.get_text('what_does_it_mean')}** {ra_info['interpretation']}")
+                        st.write(f"**{translation_manager.get_text('example')}:** {ra_info['example']}")
+        
+        with col2:
+            # JSCR details
+            st.write(translation_manager.get_text('jscr_details'))
+            st.write(translation_manager.get_text('jscr_self_cites').format(value=fast_metrics.get('self_cites', 0)))
+            st.write(translation_manager.get_text('jscr_total_cites').format(value=fast_metrics.get('total_cites', 0)))
+            st.write(translation_manager.get_text('jscr_percentage').format(value=fast_metrics.get('JSCR', 0)))
+        
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            # Citation Velocity
+            st.write(translation_manager.get_text('citation_velocity_details'))
+            st.write(f"- {translation_manager.get_text('average_citations_per_year')}: {fast_metrics.get('citation_velocity', 0)}")
+            st.write(f"- {translation_manager.get_text('articles_with_data')}: {fast_metrics.get('articles_with_velocity', 0)}")
+        
+        with col4:
+            # OA Impact Premium
+            st.write(translation_manager.get_text('oa_impact_premium_details'))
+            st.write(f"- {translation_manager.get_text('premium')}: {fast_metrics.get('OA_impact_premium', 0)}%")
+            st.write(f"- {translation_manager.get_text('oa_articles')}: {fast_metrics.get('OA_articles', 0)}")
+            st.write(f"- {translation_manager.get_text('non_oa_articles')}: {fast_metrics.get('non_OA_articles', 0)}")
+            
+            # Contextual tooltip
+            if fast_metrics.get('OA_impact_premium', 0) > 0:
+                with st.expander("🔓 " + translation_manager.get_text('open_access_premium'), expanded=False):
+                    st.success("📈 " + translation_manager.get_text('oa_premium_positive'))
+        
+        # Top concepts
+        if fast_metrics.get('top_concepts'):
+            st.subheader(translation_manager.get_text('top_10_thematic_concepts'))
+            concepts_df = pd.DataFrame(fast_metrics['top_concepts'], columns=[translation_manager.get_text('concept'), translation_manager.get_text('mentions')])
+            fig = px.bar(
+                concepts_df,
+                x=translation_manager.get_text('mentions'),
+                y=translation_manager.get_text('concept'),
+                orientation='h',
+                title=translation_manager.get_text('top_thematic_concepts'),
+                color=translation_manager.get_text('mentions')
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Contextual tooltip for DBI
+            if fast_metrics.get('DBI', 0) > 0:
+                with st.expander("🎯 " + translation_manager.get_text('diversity_balance_index'), expanded=False):
+                    dbi_info = glossary.get_detailed_info('DBI')
+                    if dbi_info:
+                        st.write(f"**{translation_manager.get_text('current_dbi_value')}:** {fast_metrics['DBI']}")
+                        st.write(f"**{translation_manager.get_text('interpretation')}:** {dbi_info['interpretation']}")
+                        st.progress(fast_metrics['DBI'])
+
+    with tab8:
+        st.subheader("🔮 Predictive Insights & Recommendations")
+        
+        # Citation seasonality analysis
+        if 'citation_seasonality' in additional_data:
+            st.subheader("Citation Seasonality Analysis")
+            
+            seasonality = additional_data['citation_seasonality']
+            
+            # Citation by month chart
+            months = list(range(1, 13))
+            month_names = [datetime(2023, m, 1).strftime('%B') for m in months]
+            citation_counts = [seasonality['citation_months'].get(m, 0) for m in months]
+            
+            fig = px.line(
+                x=month_names,
+                y=citation_counts,
+                title="Citations by Month",
+                labels={'x': 'Month', 'y': 'Number of Citations'}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Optimal publication months
+            if seasonality['optimal_publication_months']:
+                st.subheader("Recommended Publication Months")
+                
+                for optimal in seasonality['optimal_publication_months']:
+                    citation_month_name = datetime(2023, int(optimal['citation_month']), 1).strftime('%B')
+                    publication_month_name = datetime(2023, int(optimal['recommended_publication_month']), 1).strftime('%B')
+                    
+                    st.info(
+                        f"**Publish in {publication_month_name}** to target high-citation month {citation_month_name} "
+                        f"({optimal['citation_count']} citations)"
+                    )
+        
+        # Potential reviewers analysis
+        if 'potential_reviewers' in additional_data:
+            st.subheader("Potential Reviewer Discovery")
+            
+            reviewers_info = additional_data['potential_reviewers']
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Journal Authors", reviewers_info['total_journal_authors'])
+            with col2:
+                st.metric("Authors with Overlaps", reviewers_info['total_overlap_authors'])
+            with col3:
+                st.metric("Potential Reviewers Found", reviewers_info['total_potential_reviewers'])
+            
+            # Top potential reviewers
+            if reviewers_info['potential_reviewers']:
+                st.subheader("Top Potential Reviewers")
+                
+                top_reviewers = reviewers_info['potential_reviewers'][:10]
+                
+                reviewers_df = pd.DataFrame([
+                    {
+                        'Author': reviewer['author'],
+                        'Citation_Count': reviewer['citation_count'],
+                        'Example_Citing_DOIs': ', '.join(reviewer['citing_dois'][:3]) + ('...' if len(reviewer['citing_dois']) > 3 else '')
+                    }
+                    for reviewer in top_reviewers
+                ])
+                st.dataframe(reviewers_df)
+                
+                st.info(
+                    "💡 **These authors cite your journal but have never published in it. "
+                    "They represent excellent potential reviewers as they are familiar with "
+                    "your journal's content but maintain editorial independence.**"
+                )
 
 # === 19. Main Analysis Function ===
-def analyze_journal(issns_list, period_str):
+def analyze_journal(issn, period_str, special_analysis=False):
     global delayer
     delayer = AdaptiveDelayer()
     
     state = get_analysis_state()
     state.analysis_complete = False
+    
+    # Set Special Analysis mode based on checkbox
+    state.is_special_analysis = special_analysis
     
     # Load metrics data at the start
     load_metrics_data()
@@ -2770,153 +4093,208 @@ def analyze_journal(issns_list, period_str):
     overall_progress = st.progress(0)
     overall_status = st.empty()
     
-    # Period parsing
+    # Period parsing - use fixed dates for Special Analysis
     overall_status.text(translation_manager.get_text('parsing_period'))
     
-    years = parse_period(period_str)
-    if not years:
-        return {}
-    from_date = f"{min(years)}-01-01"
-    until_date = f"{max(years)}-12-31"
+    if state.is_special_analysis:
+        # Use fixed dates for Special Analysis: current date -1580 days to current date -120 days
+        current_date = datetime.now()
+        from_date = (current_date - timedelta(days=1580)).strftime('%Y-%m-%d')
+        until_date = (current_date - timedelta(days=120)).strftime('%Y-%m-%d')
+        years = [current_date.year - 4, current_date.year - 3, current_date.year - 2, current_date.year - 1]
+        st.info(f"🔬 Special Analysis Mode: Using fixed period {from_date} to {until_date}")
+    else:
+        # Normal period parsing
+        years = parse_period(period_str)
+        if not years:
+            return
+        from_date = f"{min(years)}-01-01"
+        until_date = f"{max(years)}-12-31"
     
     overall_progress.progress(0.1)
     
-    journal_results = {}
+    # Journal name
+    overall_status.text(translation_manager.get_text('getting_journal_name'))
+    journal_name = get_journal_name(issn)
+    st.success(translation_manager.get_text('journal_found').format(journal_name=journal_name, issn=issn))
+    overall_progress.progress(0.2)
     
-    for idx, issn in enumerate(issns_list):
-        if not issn:
-            continue
-            
-        overall_status.text(f"Processing journal {idx+1}/{len(issns_list)}: {issn}")
-        
-        # Journal name
-        journal_name = get_journal_name(issn)
-        st.success(translation_manager.get_text('journal_found').format(journal_name=journal_name, issn=issn))
-        
-        # Article retrieval
-        items = fetch_articles_by_issn_period(issn, from_date, until_date)
-        if not items:
-            st.error(translation_manager.get_text('no_articles_found'))
-            continue
+    # Article retrieval
+    overall_status.text(translation_manager.get_text('loading_articles'))
+    items = fetch_articles_by_issn_period(issn, from_date, until_date)
+    if not items:
+        st.error(translation_manager.get_text('no_articles_found'))
+        return
 
-        n_analyzed = len(items)
-        st.success(translation_manager.get_text('articles_found').format(count=n_analyzed))
+    n_analyzed = len(items)
+    st.success(translation_manager.get_text('articles_found').format(count=n_analyzed))
+    overall_progress.progress(0.3)
+    
+    # Data validation
+    overall_status.text(translation_manager.get_text('validating_data'))
+    validated_items = validate_and_clean_data(items)
+    journal_prefix = get_doi_prefix(validated_items[0].get('DOI', '')) if validated_items else ''
+    overall_progress.progress(0.4)
+    
+    # Analyzed articles processing
+    overall_status.text(translation_manager.get_text('processing_articles'))
+    
+    analyzed_metadata = []
+    dois = [item.get('DOI') for item in validated_items if item.get('DOI')]
+    
+    # Progress bar for metadata processing
+    meta_progress = st.progress(0)
+    meta_status = st.empty()
+    
+    # Prepare arguments for threading
+    args_list = [(doi, state) for doi in dois]
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(get_unified_metadata, args): args for args in args_list}
         
-        # Data validation
-        validated_items = validate_and_clean_data(items)
-        journal_prefix = get_doi_prefix(validated_items[0].get('DOI', '')) if validated_items else ''
-        
-        # Analyzed articles processing
-        analyzed_metadata = []
-        dois = [item.get('DOI') for item in validated_items if item.get('DOI')]
-        
-        # Progress bar for metadata processing
-        meta_progress = st.progress(0)
-        meta_status = st.empty()
-        
-        # Prepare arguments for threading
-        args_list = [(doi, state) for doi in dois]
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(get_unified_metadata, args): args for args in args_list}
+        for i, future in enumerate(as_completed(futures)):
+            args = futures[future]
+            doi = args[0]
+            try:
+                result = future.result()
+                analyzed_metadata.append({
+                    'doi': doi,
+                    'crossref': result['crossref'],
+                    'openalex': result['openalex']
+                })
+            except Exception as e:
+                st.error(f"Error processing DOI {doi}: {e}")
             
-            for i, future in enumerate(as_completed(futures)):
-                args = futures[future]
-                doi = args[0]
-                try:
-                    result = future.result()
-                    analyzed_metadata.append({
-                        'doi': doi,
-                        'crossref': result['crossref'],
-                        'openalex': result['openalex']
-                    })
-                except Exception as e:
-                    st.error(f"Error processing DOI {doi}: {e}")
-                
-                progress = (i + 1) / len(dois)
-                meta_progress.progress(progress)
-                meta_status.text(f"{translation_manager.get_text('getting_metadata')}: {i + 1}/{len(dois)}")
+            progress = (i + 1) / len(dois)
+            meta_progress.progress(progress)
+            meta_status.text(f"{translation_manager.get_text('getting_metadata')}: {i + 1}/{len(dois)}")
+    
+    meta_progress.empty()
+    meta_status.empty()
+    overall_progress.progress(0.6)
+    
+    # Citing works retrieval
+    overall_status.text(translation_manager.get_text('collecting_citations'))
+    
+    all_citing_metadata = []
+    analyzed_dois = [am['doi'] for am in analyzed_metadata if am.get('doi')]
+    
+    # Progress bar for citation collection
+    citing_progress = st.progress(0)
+    citing_status = st.empty()
+    
+    # Prepare arguments for threading
+    citing_args_list = [(doi, state) for doi in analyzed_dois]
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(get_citing_dois_and_metadata, args): args for args in citing_args_list}
         
-        meta_progress.empty()
-        meta_status.empty()
-        
-        # Citing works retrieval
-        all_citing_metadata = []
-        analyzed_dois = [am['doi'] for am in analyzed_metadata if am.get('doi')]
-        
-        # Progress bar for citation collection
-        citing_progress = st.progress(0)
-        citing_status = st.empty()
-        
-        # Prepare arguments for threading
-        citing_args_list = [(doi, state) for doi in analyzed_dois]
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(get_citing_dois_and_metadata, args): args for args in citing_args_list}
+        for i, future in enumerate(as_completed(futures)):
+            args = futures[future]
+            doi = args[0]
+            try:
+                citings = future.result()
+                all_citing_metadata.extend(citings)
+            except Exception as e:
+                st.error(f"Error collecting citations for {doi}: {e}")
             
-            for i, future in enumerate(as_completed(futures)):
-                args = futures[future]
-                doi = args[0]
-                try:
-                    citings = future.result()
-                    all_citing_metadata.extend(citings)
-                except Exception as e:
-                    st.error(f"Error collecting citations for {doi}: {e}")
-                
-                progress = (i + 1) / len(analyzed_dois)
-                citing_progress.progress(progress)
-                citing_status.text(f"{translation_manager.get_text('collecting_citations_progress')}: {i + 1}/{len(analyzed_dois)}")
-        
-        citing_progress.empty()
-        citing_status.empty()
-        
-        # Unique citing works
-        unique_citing_dois = set(c['doi'] for c in all_citing_metadata if c.get('doi'))
-        n_citing = len(unique_citing_dois)
-        st.success(translation_manager.get_text('unique_citing_works').format(count=n_citing))
-        
-        # Statistics calculation
-        analyzed_stats = extract_stats_from_metadata(analyzed_metadata, journal_prefix=journal_prefix)
-        citing_stats = extract_stats_from_metadata(all_citing_metadata, is_analyzed=False)
-        enhanced_stats = enhanced_stats_calculation(analyzed_metadata, all_citing_metadata, state)
-        
-        # Overlap analysis
-        overlap_details = analyze_overlaps(analyzed_metadata, all_citing_metadata, state)
-        
-        citation_timing = calculate_citation_timing(analyzed_metadata, state)
-        
-        # Fast metrics calculation (NEW)
-        fast_metrics = calculate_all_fast_metrics(analyzed_metadata, all_citing_metadata, state, issn)
-        
-        # Store results for this journal
-        journal_results[journal_name] = {
-            'analyzed_stats': analyzed_stats,
-            'citing_stats': citing_stats,
-            'enhanced_stats': enhanced_stats,
-            'citation_timing': citation_timing,
-            'overlap_details': overlap_details,
-            'fast_metrics': fast_metrics,
-            'analyzed_metadata': analyzed_metadata,
-            'all_citing_metadata': all_citing_metadata,
-            'journal_name': journal_name,
-            'issn': issn,
-            'period': period_str,
-            'n_analyzed': n_analyzed,
-            'n_citing': n_citing
-        }
-        
-        progress_per_journal = 0.9 / len(issns_list)
-        overall_progress.progress(0.1 + (idx + 1) * progress_per_journal)
+            progress = (i + 1) / len(analyzed_dois)
+            citing_progress.progress(progress)
+            citing_status.text(f"{translation_manager.get_text('collecting_citations_progress')}: {i + 1}/{len(analyzed_dois)}")
+    
+    citing_progress.empty()
+    citing_status.empty()
+    
+    # Unique citing works
+    unique_citing_dois = set(c['doi'] for c in all_citing_metadata if c.get('doi'))
+    n_citing = len(unique_citing_dois)
+    st.success(translation_manager.get_text('unique_citing_works').format(count=n_citing))
+    overall_progress.progress(0.8)
+    
+    # Statistics calculation
+    overall_status.text(translation_manager.get_text('calculating_statistics'))
+    
+    analyzed_stats = extract_stats_from_metadata(analyzed_metadata, journal_prefix=journal_prefix)
+    citing_stats = extract_stats_from_metadata(all_citing_metadata, is_analyzed=False)
+    enhanced_stats = enhanced_stats_calculation(analyzed_metadata, all_citing_metadata, state)
+    
+    # Overlap analysis
+    overlap_details = analyze_overlaps(analyzed_metadata, all_citing_metadata, state)
+    
+    citation_timing = calculate_citation_timing(analyzed_metadata, state)
+    
+    # Fast metrics calculation (NEW)
+    overall_status.text(translation_manager.get_text('calculating_fast_metrics'))
+    fast_metrics = calculate_all_fast_metrics(analyzed_metadata, all_citing_metadata, state, issn)
+    
+    # Special Analysis metrics calculation (NEW)
+    special_analysis_metrics = {}
+    if state.is_special_analysis:
+        overall_status.text("Calculating Special Analysis metrics...")
+        special_analysis_metrics = calculate_special_analysis_metrics(analyzed_metadata, all_citing_metadata, state)
+    
+    # === NEW ADDITIONAL ANALYSES ===
+    overall_status.text("Calculating additional insights...")
+    
+    # Citation seasonality analysis
+    citation_seasonality = analyze_citation_seasonality(
+        analyzed_metadata, 
+        state, 
+        citation_timing['days_median']
+    )
+    
+    # Potential reviewer discovery
+    potential_reviewers = find_potential_reviewers(
+        analyzed_metadata, 
+        all_citing_metadata, 
+        overlap_details, 
+        state
+    )
+    
+    # === НОВЫЙ АНАЛИЗ: Ключевые слова в названиях ===
+    overall_status.text("Analyzing title keywords...")
+    title_keywords_analyzer = TitleKeywordsAnalyzer()
+    
+    # Извлекаем названия статей
+    analyzed_titles = extract_titles_from_metadata(analyzed_metadata)
+    citing_titles = extract_titles_from_metadata(all_citing_metadata)
+    
+    # Анализируем ключевые слова
+    title_keywords = title_keywords_analyzer.analyze_titles(analyzed_titles, citing_titles)
+    
+    # Combine all additional data
+    additional_data = {
+        'citation_seasonality': citation_seasonality,
+        'potential_reviewers': potential_reviewers,
+        'title_keywords': title_keywords
+    }
+    
+    # Add special analysis metrics if available
+    if state.is_special_analysis:
+        additional_data['special_analysis_metrics'] = special_analysis_metrics
+    
+    overall_progress.progress(0.9)
     
     # Report creation
     overall_status.text(translation_manager.get_text('creating_report'))
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f'journals_comparison_{timestamp}.xlsx'
+    filename = f'journal_analysis_{issn}_{timestamp}.xlsx'
     
     # Create Excel file in memory
     excel_buffer = io.BytesIO()
-    create_enhanced_excel_report(journal_results, excel_buffer)
+    create_enhanced_excel_report(
+        analyzed_metadata, 
+        all_citing_metadata, 
+        analyzed_stats, 
+        citing_stats, 
+        enhanced_stats, 
+        citation_timing, 
+        overlap_details, 
+        fast_metrics, 
+        excel_buffer,
+        additional_data
+    )
     
     excel_buffer.seek(0)
     state.excel_buffer = excel_buffer
@@ -2924,14 +4302,31 @@ def analyze_journal(issns_list, period_str):
     overall_progress.progress(1.0)
     overall_status.text(translation_manager.get_text('analysis_complete'))
     
-    state.analysis_results = journal_results
+    # Save results
+    state.analysis_results = {
+        'analyzed_stats': analyzed_stats,
+        'citing_stats': citing_stats,
+        'enhanced_stats': enhanced_stats,
+        'citation_timing': citation_timing,
+        'overlap_details': overlap_details,
+        'fast_metrics': fast_metrics,
+        'additional_data': additional_data,
+        'journal_name': journal_name,
+        'issn': issn,
+        'period': period_str,
+        'n_analyzed': n_analyzed,
+        'n_citing': n_citing
+    }
+    
+    # Add special analysis metrics to results if available
+    if state.is_special_analysis:
+        state.analysis_results['special_analysis_metrics'] = special_analysis_metrics
+    
     state.analysis_complete = True
     
     time.sleep(1)
     overall_progress.empty()
     overall_status.empty()
-    
-    return journal_results
 
 def debug_issn_matching():
     """Debug function to check ISSN matching"""
@@ -2975,27 +4370,38 @@ def main():
     with st.sidebar:
         st.header("📝 " + translation_manager.get_text('analysis_parameters'))
         
-        # Multiple ISSN input
-        issns_input = st.text_input(
-            "Enter 1-3 ISSNs (comma-separated):",
+        issn = st.text_input(
+            translation_manager.get_text('journal_issn'),
             value="2411-1414",
-            help="e.g., 2411-1414 or 2411-1414,1234-5678,9876-5432"
+            help=glossary.get_tooltip('ISSN')
         )
         
+        # Special Analysis checkbox
+        special_analysis = st.checkbox(
+            "🎯 Special Analysis Mode", 
+            value=False,
+            help="Calculate CiteScore and Impact Factor metrics using fixed time windows (current date -1580 days to current date -120 days)"
+        )
+        
+        # Period input - disabled when Special Analysis is active
         period = st.text_input(
             translation_manager.get_text('analysis_period'),
             value="2022-2025",
-            help=translation_manager.get_text('period_examples')
+            help=translation_manager.get_text('period_examples'),
+            disabled=special_analysis
         )
+        
+        if special_analysis:
+            st.info("🔬 Special Analysis Mode: Using fixed period for CiteScore & Impact Factor calculation")
         
         st.markdown("---")
         st.header("📚 " + translation_manager.get_text('dictionary_of_terms'))
         
-        # Dictionary term search widget (simplified)
+        # Dictionary term search widget
         search_term = st.selectbox(
             translation_manager.get_text('select_term_to_learn'),
             options=[""] + list(glossary.terms.keys()),
-            format_func=lambda x: translation_manager.get_text('choose_term') if x == "" else x,
+            format_func=lambda x: translation_manager.get_text('choose_term') if x == "" else f"{x} ({glossary.terms[x]['category']})",
             help=translation_manager.get_text('study_metric_meanings')
         )
         
@@ -3003,6 +4409,38 @@ def main():
             term_info = glossary.get_detailed_info(search_term)
             if term_info:
                 st.info(f"**{term_info['term']}**\n\n{term_info['definition']}")
+                st.caption(f"**{translation_manager.get_text('calculation')}:** {term_info['calculation']}")
+                st.caption(f"**{translation_manager.get_text('interpretation')}:** {term_info['interpretation']}")
+                st.caption(f"**{translation_manager.get_text('example')}:** {term_info['example']}")
+                st.caption(f"**{translation_manager.get_text('category')}:** {term_info['category']}")
+                
+                # Mark viewed term
+                if search_term not in st.session_state.viewed_terms:
+                    st.session_state.viewed_terms.add(search_term)
+                    st.toast(translation_manager.get_text('learned_term_toast').format(term=search_term), icon="🎯")
+                
+                # "I understood" button
+                if st.button(translation_manager.get_text('term_understood'), key=f"understand_{search_term}"):
+                    if search_term not in st.session_state.learned_terms:
+                        st.session_state.learned_terms.add(search_term)
+                        st.success(translation_manager.get_text('term_added_success').format(term=search_term))
+                        st.balloons()
+        
+        # Learned terms statistics
+        if st.session_state.learned_terms:
+            st.markdown("---")
+            st.header("🎓 " + translation_manager.get_text('your_progress'))
+            learned_count = len(st.session_state.learned_terms)
+            total_terms = len(glossary.terms)
+            progress = learned_count / total_terms
+            
+            st.write(f"{translation_manager.get_text('learned_terms')}: **{learned_count}/{total_terms}**")
+            st.progress(progress)
+            
+            if learned_count >= 5:
+                st.success(translation_manager.get_text('progress_great').format(count=learned_count))
+            elif learned_count >= 2:
+                st.info(translation_manager.get_text('progress_good'))
         
         st.markdown("---")
         st.header("💡 " + translation_manager.get_text('information'))
@@ -3015,7 +4453,8 @@ def main():
                 "- " + translation_manager.get_text('capability_5') + "\n" +
                 "- " + translation_manager.get_text('capability_6') + "\n" +
                 "- " + translation_manager.get_text('capability_7') + "\n" +
-                "- " + translation_manager.get_text('capability_8'))
+                "- " + translation_manager.get_text('capability_8') + "\n" +
+                "- **NEW:** Special Analysis metrics (CiteScore & Impact Factor)")
         
         st.warning("**" + translation_manager.get_text('note') + ":** \n" +
                   "- " + translation_manager.get_text('note_text_1') + "\n" +
@@ -3031,22 +4470,16 @@ def main():
         st.subheader("🚀 " + translation_manager.get_text('start_analysis'))
         
         if st.button(translation_manager.get_text('start_analysis'), type="primary", use_container_width=True):
-            issns_str = issns_input.strip()
-            if not issns_str:
-                st.error("ISSN required")
+            if not issn:
+                st.error(translation_manager.get_text('issn_required'))
                 return
-            
-            issns_list = [issn.strip() for issn in issns_str.split(',') if issn.strip()]
-            if len(issns_list) > 3 or len(issns_list) < 1:
-                st.error("Enter 1-3 ISSNs")
-                return
-            
-            if not period:
+                
+            if not period and not special_analysis:
                 st.error(translation_manager.get_text('period_required'))
                 return
                 
             with st.spinner(translation_manager.get_text('analysis_starting')):
-                journal_results = analyze_journal(issns_list, period)
+                analyze_journal(issn, period, special_analysis)
     
     with col2:
         st.subheader("📤 " + translation_manager.get_text('results'))
@@ -3057,7 +4490,7 @@ def main():
             st.download_button(
                 label="📥 " + translation_manager.get_text('download_excel_report'),
                 data=state.excel_buffer,
-                file_name=f"journals_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                file_name=f"journal_analysis_{results['issn']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
@@ -3070,77 +4503,331 @@ def main():
         results = state.analysis_results
         
         # Summary information
-        st.subheader("Summary")
-        summary_data = []
-        for journal_name, data in results.items():
-            summary_data.append({
-                'Journal': journal_name,
-                'Articles Analyzed': data['n_analyzed'],
-                'Citing Works': data['n_citing']
-            })
-        summary_df = pd.DataFrame(summary_data)
-        st.dataframe(summary_df)
+        col1, col2, col3, col4 = st.columns(4)
         
-        # Visualizations (comparative)
-        create_visualizations(results)
+        with col1:
+            st.metric(translation_manager.get_text('journal'), results['journal_name'])
+        with col2:
+            st.metric(translation_manager.get_text('issn'), results['issn'])
+        with col3:
+            st.metric(translation_manager.get_text('period'), results['period'])
+        with col4:
+            st.metric(translation_manager.get_text('articles_analyzed'), results['n_analyzed'])
         
-        # Detailed statistics (simplified comparative)
+        # Visualizations
+        create_visualizations(
+            results['analyzed_stats'],
+            results['citing_stats'], 
+            results['enhanced_stats'],
+            results['citation_timing'],
+            results['overlap_details'],
+            results.get('fast_metrics', {}),
+            results.get('additional_data', {}),
+            getattr(state, 'is_special_analysis', False) or results.get('special_analysis_metrics', {}).get('is_special_analysis', False)
+        )
+        
+        # Detailed statistics
         st.markdown("---")
         st.header("📈 " + translation_manager.get_text('detailed_statistics'))
         
-        tab1, tab2, tab3 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
             translation_manager.get_text('analyzed_articles'), 
             translation_manager.get_text('citing_works'), 
-            translation_manager.get_text('comparative_analysis')
+            translation_manager.get_text('comparative_analysis'), 
+            translation_manager.get_text('fast_metrics'),
+            "🔮 Predictive Insights",
+            "🔤 Title Keywords",
+            "🎯 Special Analysis"
         ])
         
         with tab1:
             st.subheader(translation_manager.get_text('analyzed_articles_statistics'))
-            analyzed_data = []
-            for journal_name, data in results.items():
-                stats = data['analyzed_stats']
-                row = {
-                    'Journal': journal_name,
-                    'Total Articles': stats['n_items'],
-                    'Total References': stats['total_refs'],
-                    'Self-Citations %': f"{stats['self_cites_pct']:.1f}%",
-                    'International %': f"{stats['multi_country_pct']:.1f}%"
-                }
-                analyzed_data.append(row)
-            analyzed_df = pd.DataFrame(analyzed_data)
-            st.dataframe(analyzed_df)
+            stats = results['analyzed_stats']
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric(translation_manager.get_text('total_articles'), stats['n_items'])
+                st.metric(translation_manager.get_text('single_author_articles'), stats['single_authors'])
+                st.metric(translation_manager.get_text('international_collaboration'), f"{stats['multi_country_pct']:.1f}%")
+                st.metric(translation_manager.get_text('unique_affiliations'), stats['unique_affiliations_count'])
+                
+            with col2:
+                st.metric(translation_manager.get_text('total_references'), stats['total_refs'])
+                st.metric(translation_manager.get_text('self_citations'), f"{stats['self_cites_pct']:.1f}%")
+                st.metric(translation_manager.get_text('unique_countries'), stats['unique_countries_count'])
+                st.metric(translation_manager.get_text('articles_10_citations'), stats['articles_with_10_citations'])
         
         with tab2:
             st.subheader(translation_manager.get_text('citing_works_statistics'))
-            citing_data = []
-            for journal_name, data in results.items():
-                stats = data['citing_stats']
-                row = {
-                    'Journal': journal_name,
-                    'Total Citing Articles': stats['n_items'],
-                    'Unique Journals': stats['unique_journals_count'],
-                    'Unique Publishers': stats['unique_publishers_count']
-                }
-                citing_data.append(row)
-            citing_df = pd.DataFrame(citing_data)
-            st.dataframe(citing_df)
+            stats = results['citing_stats']
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric(translation_manager.get_text('total_citing_articles'), stats['n_items'])
+                st.metric(translation_manager.get_text('unique_journals'), stats['unique_journals_count'])
+                st.metric(translation_manager.get_text('unique_publishers'), stats['unique_publishers_count'])
+                
+            with col2:
+                st.metric(translation_manager.get_text('total_references'), stats['total_refs'])
+                st.metric(translation_manager.get_text('unique_affiliations'), stats['unique_affiliations_count'])
+                st.metric(translation_manager.get_text('unique_countries'), stats['unique_countries_count'])
         
         with tab3:
             st.subheader(translation_manager.get_text('comparative_analysis'))
-            comp_data = []
-            for journal_name, data in results.items():
-                analyzed_stats = data['analyzed_stats']
-                enhanced_stats = data['enhanced_stats']
-                row = {
-                    'Journal': journal_name,
-                    'Avg Authors (Analyzed)': f"{analyzed_stats['auth_mean']:.1f}",
-                    'Avg References (Analyzed)': f"{analyzed_stats['ref_mean']:.1f}",
-                    'Avg Authors (Citing)': f"{data['citing_stats']['auth_mean']:.1f}",
-                    'Avg References (Citing)': f"{data['citing_stats']['ref_mean']:.1f}"
-                }
-                comp_data.append(row)
-            comp_df = pd.DataFrame(comp_data)
-            st.dataframe(comp_df)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric(
+                    translation_manager.get_text('average_authors_per_article') + " (" + translation_manager.get_text('analyzed') + ")", 
+                    f"{results['analyzed_stats']['auth_mean']:.1f}"
+                )
+                st.metric(
+                    translation_manager.get_text('average_references_per_article') + " (" + translation_manager.get_text('analyzed') + ")", 
+                    f"{results['analyzed_stats']['ref_mean']:.1f}"
+                )
+                
+            with col2:
+                st.metric(
+                    translation_manager.get_text('average_authors_per_article') + " (" + translation_manager.get_text('citing') + ")", 
+                    f"{results['citing_stats']['auth_mean']:.1f}"
+                )
+                st.metric(
+                    translation_manager.get_text('average_references_per_article') + " (" + translation_manager.get_text('citing') + ")", 
+                    f"{results['citing_stats']['ref_mean']:.1f}"
+                )
+        
+        with tab4:
+            st.subheader("🚀 " + translation_manager.get_text('fast_metrics'))
+            fast_metrics = results.get('fast_metrics', {})
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric(translation_manager.get_text('reference_age'), f"{fast_metrics.get('ref_median_age', 'N/A')} " + translation_manager.get_text('years'))
+                st.metric(translation_manager.get_text('jscr'), f"{fast_metrics.get('JSCR', 0)}%")
+                st.metric(translation_manager.get_text('cited_half_life'), f"{fast_metrics.get('cited_half_life_median', 'N/A')} " + translation_manager.get_text('years'))
+                st.metric(translation_manager.get_text('fwci'), fast_metrics.get('FWCI', 0))
+                
+            with col2:
+                st.metric(translation_manager.get_text('citation_velocity'), fast_metrics.get('citation_velocity', 0))
+                st.metric(translation_manager.get_text('oa_impact_premium'), f"{fast_metrics.get('OA_impact_premium', 0)}%")
+                st.metric(translation_manager.get_text('elite_index'), f"{fast_metrics.get('elite_index', 0)}%")
+                st.metric(translation_manager.get_text('author_gini'), fast_metrics.get('author_gini', 0))
+            
+            # Detailed information
+            st.subheader(translation_manager.get_text('fast_metrics_details'))
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write(translation_manager.get_text('reference_age_details'))
+                st.write(translation_manager.get_text('reference_age_median').format(value=fast_metrics.get('ref_median_age', 'N/A')))
+                st.write(translation_manager.get_text('reference_age_mean').format(value=fast_metrics.get('ref_mean_age', 'N/A')))
+                st.write(translation_manager.get_text('reference_age_percentile').format(value=f"{fast_metrics.get('ref_ages_25_75', ['N/A', 'N/A'])[0]}-{fast_metrics.get('ref_ages_25_75', ['N/A', 'N/A'])[1]}"))
+                st.write(translation_manager.get_text('reference_age_analyzed').format(value=fast_metrics.get('total_refs_analyzed', 0)))
+                
+                st.write(translation_manager.get_text('jscr_details'))
+                st.write(translation_manager.get_text('jscr_self_cites').format(value=fast_metrics.get('self_cites', 0)))
+                st.write(translation_manager.get_text('jscr_total_cites').format(value=fast_metrics.get('total_cites', 0)))
+                st.write(translation_manager.get_text('jscr_percentage').format(value=fast_metrics.get('JSCR', 0)))
+            
+            with col2:
+                st.write(translation_manager.get_text('fwci_details'))
+                st.write(translation_manager.get_text('fwci_value').format(value=fast_metrics.get('FWCI', 0)))
+                st.write(translation_manager.get_text('fwci_total_cites').format(value=fast_metrics.get('total_cites', 0)))
+                st.write(translation_manager.get_text('fwci_expected_cites').format(value=fast_metrics.get('expected_cites', 0)))
+                
+                st.write(translation_manager.get_text('dbi_details'))
+                st.write(translation_manager.get_text('dbi_value').format(value=fast_metrics.get('DBI', 0)))
+                st.write(translation_manager.get_text('dbi_unique_concepts').format(value=fast_metrics.get('unique_concepts', 0)))
+                st.write(translation_manager.get_text('dbi_total_mentions').format(value=fast_metrics.get('total_concept_mentions', 0)))
+
+        with tab5:
+            st.subheader("🔮 Predictive Insights & Advanced Analytics")
+            
+            additional_data = results.get('additional_data', {})
+            
+            if additional_data:
+                # Citation seasonality
+                if 'citation_seasonality' in additional_data:
+                    st.subheader("📅 Citation Seasonality")
+                    
+                    seasonality = additional_data['citation_seasonality']
+                    
+                    if seasonality['optimal_publication_months']:
+                        st.write("**Recommended Publication Months:**")
+                        for optimal in seasonality['optimal_publication_months']:
+                            citation_month = datetime(2023, optimal['citation_month'], 1).strftime('%B')
+                            pub_month = datetime(2023, optimal['recommended_publication_month'], 1).strftime('%B')
+                            st.info(f"• Publish in **{pub_month}** to target high-citation month **{citation_month}**")
+                
+                # Potential reviewers
+                if 'potential_reviewers' in additional_data:
+                    st.subheader("👥 Potential Reviewer Discovery")
+                    
+                    reviewers = additional_data['potential_reviewers']
+                    st.write(f"**Found {reviewers['total_potential_reviewers']} potential reviewers** who cite your journal but have never published in it.")
+                    
+                    if reviewers['potential_reviewers']:
+                        st.write("**Top candidates:**")
+                        for i, reviewer in enumerate(reviewers['potential_reviewers'][:5], 1):
+                            st.write(f"{i}. **{reviewer['author']}** - {reviewer['citation_count']} citations")
+            else:
+                st.info("No additional predictive insights available for this analysis.")
+
+        with tab6:
+            st.subheader("🔤 Title Keywords Analysis")
+            
+            additional_data = results.get('additional_data', {})
+            
+            if 'title_keywords' in additional_data:
+                keywords_data = additional_data['title_keywords']
+                
+                st.write(f"**Analyzed articles:** {keywords_data['analyzed']['total_titles']} titles")
+                st.write(f"**Citing articles:** {keywords_data['citing']['total_titles']} titles")
+                
+                # Content words
+                st.subheader("📝 Content Words (Top-10)")
+                content_data = []
+                for i, (word, count) in enumerate(keywords_data['analyzed']['content_words'][:10], 1):
+                    citing_count = next((c for w, c in keywords_data['citing']['content_words'] if w == word), 0)
+                    content_data.append({
+                        'Rank': i,
+                        'Keyword': word,
+                        'Analyzed Articles': count,
+                        'Citing Articles': citing_count
+                    })
+                
+                if content_data:
+                    content_df = pd.DataFrame(content_data)
+                    st.dataframe(content_df)
+                
+                # Compound words
+                if keywords_data['analyzed']['compound_words']:
+                    st.subheader("🔗 Compound Words (Top-10)")
+                    compound_data = []
+                    for i, (word, count) in enumerate(keywords_data['analyzed']['compound_words'][:10], 1):
+                        citing_count = next((c for w, c in keywords_data['citing']['compound_words'] if w == word), 0)
+                        compound_data.append({
+                            'Rank': i,
+                            'Keyword': word,
+                            'Analyzed Articles': count,
+                            'Citing Articles': citing_count
+                        })
+                    
+                    if compound_data:
+                        compound_df = pd.DataFrame(compound_data)
+                        st.dataframe(compound_df)
+                
+                # Scientific stopwords
+                if keywords_data['analyzed']['scientific_words']:
+                    st.subheader("📚 Scientific Stopwords (Top-10)")
+                    scientific_data = []
+                    for i, (word, count) in enumerate(keywords_data['analyzed']['scientific_words'][:10], 1):
+                        citing_count = next((c for w, c in keywords_data['citing']['scientific_words'] if w == word), 0)
+                        scientific_data.append({
+                            'Rank': i,
+                            'Keyword': word,
+                            'Analyzed Articles': count,
+                            'Citing Articles': citing_count
+                        })
+                    
+                    if scientific_data:
+                        scientific_df = pd.DataFrame(scientific_data)
+                        st.dataframe(scientific_df)
+            else:
+                st.info("Title keywords analysis not available for this dataset.")
+
+        with tab7:
+            st.subheader("🎯 Special Analysis Metrics")
+            
+            if state.is_special_analysis and 'special_analysis_metrics' in results:
+                special_metrics = results['special_analysis_metrics']
+                debug_info = special_metrics.get('debug_info', {})
+                
+                st.success("**Special Analysis Mode Active** - Calculating CiteScore and Impact Factor metrics")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric(
+                        "CiteScore", 
+                        f"{special_metrics.get('cite_score', 0):.3f}",
+                        delta=None,
+                        help="Total citations (A) / Total articles (B) in Special Analysis period"
+                    )
+                with col2:
+                    st.metric(
+                        "CiteScore Corrected", 
+                        f"{special_metrics.get('cite_score_corrected', 0):.3f}",
+                        delta=None,
+                        help="Scopus-indexed citations (C) / Total articles (B)"
+                    )
+                with col3:
+                    st.metric(
+                        "Impact Factor", 
+                        f"{special_metrics.get('impact_factor', 0):.3f}",
+                        delta=None,
+                        help="Total citations (E) / Total articles (D) in IF calculation period"
+                    )
+                with col4:
+                    st.metric(
+                        "Impact Factor Corrected", 
+                        f"{special_metrics.get('impact_factor_corrected', 0):.3f}",
+                        delta=None,
+                        help="WoS-indexed citations (F) / Total articles (D)"
+                    )
+                
+                # Detailed calculation breakdown
+                with st.expander("📊 Calculation Details", expanded=True):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("CiteScore Calculation")
+                        st.write(f"**B (Total Articles):** {debug_info.get('B', 0)}")
+                        st.write(f"**A (Total Citations):** {debug_info.get('A', 0)}")
+                        st.write(f"**C (Scopus Citations):** {debug_info.get('C', 0)}")
+                        st.write(f"**CiteScore:** {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = **{special_metrics.get('cite_score', 0):.3f}**")
+                        st.write(f"**CiteScore Corrected:** {debug_info.get('C', 0)} / {debug_info.get('B', 0)} = **{special_metrics.get('cite_score_corrected', 0):.3f}**")
+                    
+                    with col2:
+                        st.subheader("Impact Factor Calculation")
+                        st.write(f"**D (IF Articles):** {debug_info.get('D', 0)}")
+                        st.write(f"**E (IF Citations):** {debug_info.get('E', 0)}")
+                        st.write(f"**F (WoS Citations):** {debug_info.get('F', 0)}")
+                        st.write(f"**Impact Factor:** {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = **{special_metrics.get('impact_factor', 0):.3f}**")
+                        st.write(f"**Impact Factor Corrected:** {debug_info.get('F', 0)} / {debug_info.get('D', 0)} = **{special_metrics.get('impact_factor_corrected', 0):.3f}**")
+                
+                # Interpretation guidance
+                with st.expander("💡 Interpretation Guide", expanded=False):
+                    st.write("""
+                    **CiteScore Interpretation:**
+                    - **> 1.0**: Above average citation impact for the field
+                    - **0.5-1.0**: Average citation impact  
+                    - **< 0.5**: Below average citation impact
+                    
+                    **Impact Factor Interpretation:**
+                    - **> 3.0**: High impact journal
+                    - **1.0-3.0**: Medium impact journal
+                    - **< 1.0**: Lower impact journal
+                    
+                    **Corrected vs Regular Metrics:**
+                    - Regular metrics include citations from all sources
+                    - Corrected metrics only include citations from indexed journals (Scopus/WoS)
+                    - Large differences may indicate citation patterns from non-indexed sources
+                    """)
+            else:
+                st.info("""
+                **Special Analysis Metrics** are available when analyzing the specific period 
+                for CiteScore and Impact Factor calculation (typically 1580-120 days for CiteScore 
+                and specific windows for Impact Factor).
+                
+                To enable Special Analysis metrics, use the appropriate analysis period that matches
+                the calculation windows for these metrics.
+                """)
 
 # Run application
 if __name__ == "__main__":
