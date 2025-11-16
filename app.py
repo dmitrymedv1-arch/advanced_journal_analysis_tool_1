@@ -4261,16 +4261,24 @@ def analyze_journal(issn, period_str, special_analysis=False):
     title_keywords = title_keywords_analyzer.analyze_titles(analyzed_titles, citing_titles)
     
     # Combine all additional data
-    additional_data = {
+    additional_data = {}
+    
+    # Add special analysis metrics FIRST to ensure citing_articles_usage is available
+    if state.is_special_analysis and special_analysis_metrics:
+        additional_data['special_analysis_metrics'] = special_analysis_metrics
+        # Debug: проверяем передачу citing_articles_usage
+        debug_info = special_analysis_metrics.get('debug_info', {})
+        if 'citing_articles_usage' in debug_info:
+            print(f"✅ citing_articles_usage successfully passed to additional_data, size: {len(debug_info['citing_articles_usage'])}")
+        else:
+            print(f"❌ citing_articles_usage NOT found in special_analysis_metrics")
+
+    # Затем добавляем остальные данные
+    additional_data.update({
         'citation_seasonality': citation_seasonality,
         'potential_reviewers': potential_reviewers,
         'title_keywords': title_keywords
-    }
-    
-    # Add special analysis metrics if available
-    if state.is_special_analysis:
-        additional_data['special_analysis_metrics'] = special_analysis_metrics
-        print(f"🔍 DEBUG: citing_articles_usage in special_analysis_metrics: {'citing_articles_usage' in special_analysis_metrics.get('debug_info', {})}")
+    })
     
     overall_progress.progress(0.9)
     
@@ -4831,6 +4839,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
