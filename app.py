@@ -4270,6 +4270,7 @@ def analyze_journal(issn, period_str, special_analysis=False):
     # Add special analysis metrics if available
     if state.is_special_analysis:
         additional_data['special_analysis_metrics'] = special_analysis_metrics
+        print(f"🔍 DEBUG: citing_articles_usage in special_analysis_metrics: {'citing_articles_usage' in special_analysis_metrics.get('debug_info', {})}")
     
     overall_progress.progress(0.9)
     
@@ -4830,5 +4831,6 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
