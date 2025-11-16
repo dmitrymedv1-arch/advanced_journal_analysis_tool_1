@@ -4449,6 +4449,34 @@ def main():
             elif learned_count >= 2:
                 st.info(translation_manager.get_text('progress_good'))
         
+        # === НОВЫЙ РАЗДЕЛ: Скачать README ===
+        st.markdown("---")
+        st.header("📄 Documentation")
+        
+        # Функция для чтения readme файла
+        def read_readme_file():
+            try:
+                with open('readme.txt', 'r', encoding='utf-8') as file:
+                    return file.read()
+            except FileNotFoundError:
+                return "README file not found. Please make sure 'readme.txt' exists in the same directory as app.py"
+            except Exception as e:
+                return f"Error reading README file: {str(e)}"
+        
+        # Создаем кнопку для скачивания readme.txt
+        readme_content = read_readme_file()
+        
+        st.download_button(
+            label="📥 Download README.txt",
+            data=readme_content,
+            file_name="readme.txt",
+            mime="text/plain",
+            help="Download the documentation and user guide for this application",
+            use_container_width=True
+        )
+        
+        st.caption("Contains detailed instructions and information about the application")
+        
         st.markdown("---")
         st.header("💡 " + translation_manager.get_text('information'))
         
@@ -4839,6 +4867,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
