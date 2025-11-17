@@ -19,10 +19,789 @@ import os
 import random
 import seaborn as sns
 import matplotlib.pyplot as plt
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any, Optional, Union
+from dataclasses import dataclass
+from enum import Enum
+import logging
+from pydantic import BaseModel, validator
+import httpx
+import asyncio
+from contextlib import asynccontextmanager
+import diskcache
+from functools import wraps
 
 # Import translation manager
 from languages import translation_manager
+
+# =============================================================================
+# CONFIGURATION AND SETTINGS
+# =============================================================================
+
+class AppSettings(BaseModel):
+    """Application settings with validation"""
+    email: str = "your.email@example.com"
+    max_workers: int = 5
+    retries: int = 3
+    delays: List[float] = [0.2, 0.5, 0.7, 1.0, 1.3, 1.5, 2.0]
+    api_timeouts: Dict[str, int] = {
+        'crossref': 15,
+        'openalex': 10,
+        'batch': 30
+    }
+    batch_sizes: Dict[str, int] = {
+        'metadata': 10,
+        'citations': 5
+    }
+    cache_ttl: int = 3600  # 1 hour
+    max_cache_size: int = 1000
+    
+    @validator('email')
+    def validate_email(cls, v):
+        if '@' not in v:
+            raise ValueError('Invalid email format')
+        return v
+    
+    @validator('max_workers')
+    def validate_max_workers(cls, v):
+        if v < 1 or v > 20:
+            raise ValueError('max_workers must be between 1 and 20')
+        return v
+
+class AnalysisConfig:
+    """Configuration manager for the application"""
+    def __init__(self):
+        self.settings = AppSettings()
+        self._load_environment_variables()
+    
+    def _load_environment_variables(self):
+        """Load settings from environment variables"""
+        if hasattr(st, 'secrets'):
+            self.settings.email = st.secrets.get("EMAIL", self.settings.email)
+    
+    def get_settings(self) -> AppSettings:
+        return self.settings
+
+# =============================================================================
+# DATA MODELS
+# =============================================================================
+
+class ArticleMetadata(BaseModel):
+    """Model for article metadata"""
+    doi: Optional[str] = None
+    title: Optional[str] = None
+    authors: List[str] = []
+    affiliations: List[str] = []
+    countries: List[str] = []
+    publication_date: Optional[datetime] = None
+    journal_name: Optional[str] = None
+    publisher: Optional[str] = None
+    issn: List[str] = []
+    reference_count: int = 0
+    citation_count: int = 0
+    work_type: Optional[str] = None
+    concepts: List[Dict[str, Any]] = []
+    open_access: bool = False
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+class JournalMetrics(BaseModel):
+    """Model for journal metrics"""
+    h_index: int = 0
+    total_citations: int = 0
+    avg_citations_per_article: float = 0.0
+    articles_with_citations: int = 0
+    articles_without_citations: int = 0
+    self_citation_rate: float = 0.0
+    international_collaboration_rate: float = 0.0
+    reference_age_median: Optional[float] = None
+    jscr: float = 0.0
+    cited_half_life: Optional[float] = None
+    fwci: float = 0.0
+    citation_velocity: float = 0.0
+    oa_impact_premium: float = 0.0
+    elite_index: float = 0.0
+    author_gini: float = 0.0
+    dbi: float = 0.0
+
+class AnalysisResult(BaseModel):
+    """Complete analysis result model"""
+    journal_name: str
+    issn: str
+    analysis_period: str
+    analyzed_articles: List[ArticleMetadata] = []
+    citing_articles: List[ArticleMetadata] = []
+    metrics: JournalMetrics
+    timestamp: datetime = datetime.now()
+    additional_data: Dict[str, Any] = {}
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+# =============================================================================
+# CACHE MANAGEMENT
+# =============================================================================
+
+class CacheManager:
+    """Unified cache management with disk persistence"""
+    
+    def __init__(self, cache_dir: str = "./journal_cache", ttl: int = 3600):
+        self.cache = diskcache.Cache(cache_dir)
+        self.ttl = ttl
+        self._setup_cleanup()
+    
+    def _setup_cleanup(self):
+        """Setup cache cleanup on application start"""
+        try:
+            self.cache.expire()
+        except Exception:
+            pass
+    
+    def get(self, key: str) -> Any:
+        """Retrieve value from cache"""
+        try:
+            return self.cache.get(key)
+        except Exception:
+            return None
+    
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Store value in cache"""
+        try:
+            self.cache.set(key, value, expire=ttl or self.ttl)
+            return True
+        except Exception:
+            return False
+    
+    def delete(self, key: str) -> bool:
+        """Delete key from cache"""
+        try:
+            self.cache.delete(key)
+            return True
+        except Exception:
+            return False
+    
+    def clear(self) -> bool:
+        """Clear entire cache"""
+        try:
+            self.cache.clear()
+            return True
+        except Exception:
+            return False
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics"""
+        try:
+            return {
+                'size': len(self.cache),
+                'directory': self.cache.directory,
+                'ttl': self.ttl
+            }
+        except Exception:
+            return {'size': 0, 'directory': 'unknown', 'ttl': self.ttl}
+
+# =============================================================================
+# ERROR HANDLING AND RETRY MECHANISM
+# =============================================================================
+
+class AnalysisError(Exception):
+    """Custom exception for analysis errors"""
+    pass
+
+class APIError(AnalysisError):
+    """Exception for API-related errors"""
+    pass
+
+class DataValidationError(AnalysisError):
+    """Exception for data validation errors"""
+    pass
+
+def retry_on_exception(
+    max_retries: int = 3,
+    delay: float = 1.0,
+    backoff: float = 2.0,
+    exceptions: Tuple[Type[Exception]] = (Exception,),
+    logger: Optional[logging.Logger] = None
+):
+    """
+    Retry decorator with exponential backoff
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            current_delay = delay
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        if logger:
+                            logger.warning(
+                                f"Attempt {attempt + 1}/{max_retries} failed for {func.__name__}: {str(e)}. "
+                                f"Retrying in {current_delay}s..."
+                            )
+                        time.sleep(current_delay)
+                        current_delay *= backoff
+                    else:
+                        if logger:
+                            logger.error(
+                                f"All {max_retries} attempts failed for {func.__name__}: {str(e)}"
+                            )
+            
+            raise last_exception
+        return wrapper
+    return decorator
+
+def handle_analysis_errors(func):
+    """
+    Decorator to handle analysis errors gracefully
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except APIError as e:
+            st.error(f"API Error in {func.__name__}: {str(e)}")
+            return None
+        except DataValidationError as e:
+            st.error(f"Data Validation Error in {func.__name__}: {str(e)}")
+            return None
+        except AnalysisError as e:
+            st.error(f"Analysis Error in {func.__name__}: {str(e)}")
+            return None
+        except Exception as e:
+            st.error(f"Unexpected Error in {func.__name__}: {str(e)}")
+            return None
+    return wrapper
+
+# =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
+
+class AnalysisLogger:
+    """Enhanced logging for journal analysis"""
+    
+    def __init__(self, name: str = "journal_analysis"):
+        self.logger = logging.getLogger(name)
+        self._setup_logging()
+    
+    def _setup_logging(self):
+        """Setup logging configuration"""
+        if not self.logger.handlers:
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            
+            # Stream handler for Streamlit
+            stream_handler = logging.StreamHandler()
+            stream_handler.setFormatter(formatter)
+            self.logger.addHandler(stream_handler)
+            
+            # File handler for persistence
+            try:
+                file_handler = logging.FileHandler('journal_analysis.log')
+                file_handler.setFormatter(formatter)
+                self.logger.addHandler(file_handler)
+            except Exception:
+                pass
+            
+            self.logger.setLevel(logging.INFO)
+    
+    def info(self, message: str, **kwargs):
+        """Log info message"""
+        self.logger.info(message, extra=kwargs)
+    
+    def warning(self, message: str, **kwargs):
+        """Log warning message"""
+        self.logger.warning(message, extra=kwargs)
+    
+    def error(self, message: str, **kwargs):
+        """Log error message"""
+        self.logger.error(message, extra=kwargs)
+    
+    def debug(self, message: str, **kwargs):
+        """Log debug message"""
+        self.logger.debug(message, extra=kwargs)
+
+# =============================================================================
+# API CLIENTS
+# =============================================================================
+
+class APIClientBase:
+    """Base class for API clients"""
+    
+    def __init__(self, config: AnalysisConfig, logger: AnalysisLogger, cache: CacheManager):
+        self.config = config
+        self.logger = logger
+        self.cache = cache
+        self.settings = config.get_settings()
+    
+    @retry_on_exception(max_retries=3, delay=1.0, backoff=2.0)
+    def _make_request(self, url: str, headers: Optional[Dict] = None, timeout: int = 30) -> Optional[Dict]:
+        """Make HTTP request with retry logic"""
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Request failed for {url}: {str(e)}")
+            raise APIError(f"Failed to fetch data from {url}: {str(e)}")
+
+class CrossrefClient(APIClientBase):
+    """Client for Crossref API"""
+    
+    def __init__(self, config: AnalysisConfig, logger: AnalysisLogger, cache: CacheManager):
+        super().__init__(config, logger, cache)
+        self.base_url = "https://api.crossref.org"
+        self.headers = {'User-Agent': f"JournalAnalyzer/1.0 (mailto:{self.settings.email})"}
+    
+    def get_article_metadata(self, doi: str) -> Optional[Dict]:
+        """Get article metadata from Crossref"""
+        cache_key = f"crossref_metadata_{doi}"
+        cached_data = self.cache.get(cache_key)
+        if cached_data:
+            return cached_data
+        
+        url = f"{self.base_url}/works/{quote(doi)}"
+        data = self._make_request(url, self.headers, self.settings.api_timeouts['crossref'])
+        
+        if data and 'message' in data:
+            self.cache.set(cache_key, data['message'])
+            return data['message']
+        
+        return None
+    
+    def get_journal_articles(self, issn: str, from_date: str, until_date: str) -> List[Dict]:
+        """Get journal articles by ISSN and date range"""
+        cache_key = f"crossref_journal_{issn}_{from_date}_{until_date}"
+        cached_data = self.cache.get(cache_key)
+        if cached_data:
+            return cached_data
+        
+        articles = []
+        cursor = "*"
+        params = {
+            'filter': f'issn:{issn},from-pub-date:{from_date},until-pub-date:{until_date}',
+            'rows': 1000,
+            'cursor': cursor,
+            'mailto': self.settings.email
+        }
+        
+        while cursor:
+            params['cursor'] = cursor
+            url = f"{self.base_url}/works"
+            
+            try:
+                data = self._make_request(url, self.headers, params=params)
+                if data and 'message' in data:
+                    new_items = data['message'].get('items', [])
+                    articles.extend(new_items)
+                    cursor = data['message'].get('next-cursor')
+                    
+                    if not new_items:
+                        break
+            except APIError:
+                break
+        
+        if articles:
+            self.cache.set(cache_key, articles)
+        
+        return articles
+
+class OpenAlexClient(APIClientBase):
+    """Client for OpenAlex API"""
+    
+    def __init__(self, config: AnalysisConfig, logger: AnalysisLogger, cache: CacheManager):
+        super().__init__(config, logger, cache)
+        self.base_url = "https://api.openalex.org"
+    
+    def get_article_metadata(self, doi: str) -> Optional[Dict]:
+        """Get article metadata from OpenAlex"""
+        cache_key = f"openalex_metadata_{doi}"
+        cached_data = self.cache.get(cache_key)
+        if cached_data:
+            return cached_data
+        
+        normalized_doi = doi if doi.startswith('http') else f"https://doi.org/{doi}"
+        url = f"{self.base_url}/works/{quote(normalized_doi)}"
+        
+        data = self._make_request(url, timeout=self.settings.api_timeouts['openalex'])
+        
+        if data:
+            self.cache.set(cache_key, data)
+            return data
+        
+        return None
+    
+    def get_citing_works(self, work_id: str, per_page: int = 100) -> List[Dict]:
+        """Get works that cite the given work"""
+        cache_key = f"openalex_citing_{work_id}"
+        cached_data = self.cache.get(cache_key)
+        if cached_data:
+            return cached_data
+        
+        citing_works = []
+        cursor = "*"
+        url = f"{self.base_url}/works?filter=cites:{work_id}&per-page={per_page}"
+        
+        while cursor:
+            try:
+                full_url = f"{url}&cursor={cursor}"
+                data = self._make_request(full_url, timeout=self.settings.api_timeouts['batch'])
+                
+                if data and 'results' in data:
+                    citing_works.extend(data['results'])
+                    cursor = data.get('meta', {}).get('next_cursor')
+                    
+                    if not data['results']:
+                        break
+                else:
+                    break
+            except APIError:
+                break
+        
+        if citing_works:
+            self.cache.set(cache_key, citing_works)
+        
+        return citing_works
+    
+    def get_journal_info(self, issn: str) -> Optional[Dict]:
+        """Get journal information by ISSN"""
+        cache_key = f"openalex_journal_{issn}"
+        cached_data = self.cache.get(cache_key)
+        if cached_data:
+            return cached_data
+        
+        url = f"{self.base_url}/sources?filter=issn:{issn}"
+        data = self._make_request(url, timeout=self.settings.api_timeouts['openalex'])
+        
+        if data and data.get('meta', {}).get('count', 0) > 0:
+            journal_data = data['results'][0]
+            self.cache.set(cache_key, journal_data)
+            return journal_data
+        
+        return None
+
+# =============================================================================
+# DATA PROCESSORS
+# =============================================================================
+
+class DataProcessor:
+    """Processor for data extraction and transformation"""
+    
+    def __init__(self, logger: AnalysisLogger):
+        self.logger = logger
+    
+    def extract_article_metadata(self, crossref_data: Optional[Dict], openalex_data: Optional[Dict]) -> ArticleMetadata:
+        """Extract unified article metadata from Crossref and OpenAlex data"""
+        metadata = ArticleMetadata()
+        
+        # Extract from Crossref
+        if crossref_data:
+            metadata.doi = crossref_data.get('DOI')
+            metadata.title = crossref_data.get('title', [''])[0] if crossref_data.get('title') else None
+            metadata.publication_date = self._extract_publication_date(crossref_data)
+            metadata.journal_name = crossref_data.get('container-title', [''])[0] if crossref_data.get('container-title') else None
+            metadata.publisher = crossref_data.get('publisher')
+            metadata.issn = crossref_data.get('ISSN', [])
+            metadata.reference_count = crossref_data.get('reference-count', 0)
+            metadata.citation_count = crossref_data.get('is-referenced-by-count', 0)
+            metadata.work_type = crossref_data.get('type')
+            
+            # Extract authors from Crossref
+            metadata.authors = self._extract_crossref_authors(crossref_data)
+        
+        # Extract from OpenAlex
+        if openalex_data:
+            # Use OpenAlex data to supplement or override
+            if not metadata.title:
+                metadata.title = openalex_data.get('title')
+            
+            if not metadata.publication_date:
+                pub_date = openalex_data.get('publication_date')
+                if pub_date:
+                    try:
+                        metadata.publication_date = datetime.fromisoformat(pub_date.replace('Z', '+00:00'))
+                    except ValueError:
+                        pass
+            
+            # Extract authors, affiliations, and countries from OpenAlex
+            authors, affiliations, countries = self._extract_openalex_authors_affiliations(openalex_data)
+            if authors:
+                metadata.authors = authors
+            metadata.affiliations = affiliations
+            metadata.countries = countries
+            
+            # Extract concepts
+            metadata.concepts = openalex_data.get('concepts', [])
+            
+            # Extract open access info
+            metadata.open_access = openalex_data.get('open_access', {}).get('is_oa', False)
+            
+            # Use OpenAlex citation count if higher
+            oa_citations = openalex_data.get('cited_by_count', 0)
+            if oa_citations > metadata.citation_count:
+                metadata.citation_count = oa_citations
+        
+        return metadata
+    
+    def _extract_publication_date(self, crossref_data: Dict) -> Optional[datetime]:
+        """Extract publication date from Crossref data"""
+        date_parts = crossref_data.get('published', {}).get('date-parts', [[]])[0]
+        if date_parts and len(date_parts) >= 1:
+            try:
+                year = date_parts[0]
+                month = date_parts[1] if len(date_parts) > 1 else 1
+                day = date_parts[2] if len(date_parts) > 2 else 1
+                return datetime(year, month, day)
+            except (ValueError, TypeError):
+                pass
+        return None
+    
+    def _extract_crossref_authors(self, crossref_data: Dict) -> List[str]:
+        """Extract authors from Crossref data"""
+        authors = []
+        for author in crossref_data.get('author', []):
+            family_name = author.get('family', '').strip()
+            given_name = author.get('given', '').strip()
+            if family_name or given_name:
+                author_name = f"{given_name} {family_name}".strip()
+                authors.append(author_name)
+        return authors
+    
+    def _extract_openalex_authors_affiliations(self, openalex_data: Dict) -> Tuple[List[str], List[str], List[str]]:
+        """Extract authors, affiliations and countries from OpenAlex data"""
+        authors = []
+        affiliations = set()
+        countries = set()
+        
+        try:
+            for authorship in openalex_data.get('authorships', []):
+                author_name = authorship.get('author', {}).get('display_name', '')
+                if author_name and author_name != 'Unknown':
+                    authors.append(author_name)
+                
+                # Extract affiliations and countries
+                for institution in authorship.get('institutions', []):
+                    inst_name = institution.get('display_name')
+                    country_code = institution.get('country_code')
+                    
+                    if inst_name:
+                        affiliations.add(inst_name)
+                    if country_code:
+                        countries.add(country_code.upper())
+        except (KeyError, TypeError, AttributeError) as e:
+            self.logger.warning(f"Error extracting OpenAlex authorships: {str(e)}")
+        
+        return authors, list(affiliations), list(countries)
+    
+    def validate_and_clean_articles(self, items: List[Dict]) -> List[Dict]:
+        """Validate and clean article data"""
+        validated = []
+        skipped_count = 0
+        
+        for item in items:
+            if not item.get('DOI'):
+                skipped_count += 1
+                continue
+            
+            doi = item['DOI'].lower().strip()
+            if not doi.startswith('10.'):
+                skipped_count += 1
+                continue
+            
+            # Validate publication date
+            date_parts = item.get('created', {}).get('date-parts', [[]])[0]
+            if not date_parts or date_parts[0] < 1900:
+                skipped_count += 1
+                continue
+            
+            item['DOI'] = doi
+            validated.append(item)
+        
+        if skipped_count > 0:
+            self.logger.warning(f"Skipped {skipped_count} invalid articles")
+        
+        return validated
+
+# =============================================================================
+# METRICS CALCULATORS
+# =============================================================================
+
+class MetricsCalculator:
+    """Calculator for journal metrics"""
+    
+    def __init__(self, logger: AnalysisLogger):
+        self.logger = logger
+    
+    def calculate_basic_metrics(self, analyzed_articles: List[ArticleMetadata], citing_articles: List[ArticleMetadata]) -> Dict[str, Any]:
+        """Calculate basic journal metrics"""
+        if not analyzed_articles:
+            return {}
+        
+        # Citation metrics
+        citation_counts = [article.citation_count for article in analyzed_articles]
+        citation_counts.sort(reverse=True)
+        
+        # H-index calculation
+        h_index = 0
+        for i, count in enumerate(citation_counts):
+            if count >= i + 1:
+                h_index = i + 1
+            else:
+                break
+        
+        # Basic statistics
+        total_articles = len(analyzed_articles)
+        total_citations = sum(citation_counts)
+        articles_with_citations = len([c for c in citation_counts if c > 0])
+        articles_without_citations = total_articles - articles_with_citations
+        
+        avg_citations = total_citations / total_articles if total_articles > 0 else 0
+        
+        return {
+            'h_index': h_index,
+            'total_citations': total_citations,
+            'avg_citations_per_article': avg_citations,
+            'articles_with_citations': articles_with_citations,
+            'articles_without_citations': articles_without_citations,
+            'max_citations': max(citation_counts) if citation_counts else 0,
+            'min_citations': min(citation_counts) if citation_counts else 0
+        }
+    
+    def calculate_reference_age(self, analyzed_articles: List[ArticleMetadata], crossref_client: CrossrefClient) -> Dict[str, Any]:
+        """Calculate reference age metrics"""
+        ref_ages = []
+        current_year = datetime.now().year
+        
+        for article in analyzed_articles:
+            if not article.publication_date:
+                continue
+            
+            pub_year = article.publication_date.year
+            
+            # This would need actual reference data from Crossref
+            # For now, return placeholder
+            pass
+        
+        if not ref_ages:
+            return {
+                'ref_median_age': None,
+                'ref_mean_age': None,
+                'ref_ages_25_75': [None, None],
+                'total_refs_analyzed': 0
+            }
+        
+        return {
+            'ref_median_age': float(np.median(ref_ages)),
+            'ref_mean_age': float(np.mean(ref_ages)),
+            'ref_ages_25_75': [float(np.percentile(ref_ages, 25)), float(np.percentile(ref_ages, 75))],
+            'total_refs_analyzed': len(ref_ages)
+        }
+    
+    def calculate_jscr(self, citing_articles: List[ArticleMetadata], journal_issn: str) -> Dict[str, Any]:
+        """Calculate Journal Self-Citation Rate"""
+        if not citing_articles:
+            return {
+                'JSCR': 0.0,
+                'self_cites': 0,
+                'total_cites': 0
+            }
+        
+        self_cites = 0
+        total_processed = 0
+        journal_issn_clean = journal_issn.replace('-', '').upper() if journal_issn else ""
+        
+        for citing_article in citing_articles:
+            # Check if citing article is from the same journal
+            if journal_issn_clean and any(
+                issn.replace('-', '').upper() == journal_issn_clean 
+                for issn in citing_article.issn
+            ):
+                self_cites += 1
+            total_processed += 1
+        
+        jscr = round(self_cites / total_processed * 100, 2) if total_processed > 0 else 0.0
+        
+        return {
+            'JSCR': jscr,
+            'self_cites': self_cites,
+            'total_cites': total_processed
+        }
+    
+    def calculate_international_collaboration(self, analyzed_articles: List[ArticleMetadata]) -> Dict[str, Any]:
+        """Calculate international collaboration metrics"""
+        if not analyzed_articles:
+            return {
+                'single_country_articles': 0,
+                'multi_country_articles': 0,
+                'no_country_articles': 0,
+                'single_country_pct': 0.0,
+                'multi_country_pct': 0.0,
+                'no_country_pct': 0.0
+            }
+        
+        single_country = 0
+        multi_country = 0
+        no_country = 0
+        
+        for article in analyzed_articles:
+            unique_countries = set(article.countries)
+            if not unique_countries:
+                no_country += 1
+            elif len(unique_countries) == 1:
+                single_country += 1
+            else:
+                multi_country += 1
+        
+        total_articles = len(analyzed_articles)
+        
+        return {
+            'single_country_articles': single_country,
+            'multi_country_articles': multi_country,
+            'no_country_articles': no_country,
+            'single_country_pct': (single_country / total_articles * 100) if total_articles > 0 else 0.0,
+            'multi_country_pct': (multi_country / total_articles * 100) if total_articles > 0 else 0.0,
+            'no_country_pct': (no_country / total_articles * 100) if total_articles > 0 else 0.0
+        }
+
+# =============================================================================
+# STATE MANAGEMENT
+# =============================================================================
+
+class AnalysisState:
+    """Enhanced state management for analysis"""
+    
+    def __init__(self):
+        self.crossref_cache = {}
+        self.openalex_cache = {}
+        self.unified_cache = {}
+        self.citing_cache = defaultdict(list)
+        self.institution_cache = {}
+        self.journal_cache = {}
+        self.analysis_results = None
+        self.current_progress = 0
+        self.progress_text = ""
+        self.analysis_complete = False
+        self.excel_buffer = None
+        self.if_data = None
+        self.cs_data = None
+        self.is_special_analysis = False
+        
+        # Initialize components
+        self.config = AnalysisConfig()
+        self.logger = AnalysisLogger()
+        self.cache_manager = CacheManager()
+        self.crossref_client = CrossrefClient(self.config, self.logger, self.cache_manager)
+        self.openalex_client = OpenAlexClient(self.config, self.logger, self.cache_manager)
+        self.data_processor = DataProcessor(self.logger)
+        self.metrics_calculator = MetricsCalculator(self.logger)
+
+# =============================================================================
+# ORIGINAL CODE (PRESERVED)
+# =============================================================================
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -39,7 +818,7 @@ RETRIES = 3
 DELAYS = [0.2, 0.5, 0.7, 1.0, 1.3, 1.5, 2.0]
 
 # --- State Storage Classes ---
-class AnalysisState:
+class OriginalAnalysisState:
     def __init__(self):
         self.crossref_cache = {}
         self.openalex_cache = {}
@@ -4867,8 +5646,5 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
-
-
-
 
 
