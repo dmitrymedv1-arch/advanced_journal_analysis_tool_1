@@ -3569,6 +3569,251 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     
     return special_metrics
 
+# === NEW FUNCTIONS FOR COMBINED SHEETS ===
+
+def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles):
+    """Создает объединенный лист авторов анализируемых и цитирующих статей"""
+    
+    # Нормализуем имена авторов и объединяем счетчики
+    def normalize_and_aggregate(authors_list):
+        normalized_counts = Counter()
+        for author, count in authors_list:
+            normalized_name = normalize_author_name(author)
+            normalized_counts[normalized_name] += count
+        return normalized_counts
+    
+    analyzed_authors = normalize_and_aggregate(analyzed_authors_data)
+    citing_authors = normalize_and_aggregate(citing_authors_data)
+    
+    combined_data = []
+    all_authors = set(analyzed_authors.keys()) | set(citing_authors.keys())
+    
+    for author in all_authors:
+        analyzed_count = analyzed_authors.get(author, 0)
+        citing_count = citing_authors.get(author, 0)
+        total_publications = analyzed_count + citing_count
+        
+        # Рассчитываем проценты
+        analyzed_pct = (analyzed_count / analyzed_total_articles * 100) if analyzed_total_articles > 0 else 0
+        citing_pct = (citing_count / citing_total_articles * 100) if citing_total_articles > 0 else 0
+        
+        # Определяем статус автора
+        if analyzed_count > 0 and citing_count > 0:
+            author_status = "Both"
+        elif analyzed_count > 0:
+            author_status = "Analyzed Only"
+        else:
+            author_status = "Citing Only"
+        
+        # Рассчитываем Loyalty Score (процент публикаций от общей активности)
+        loyalty_score_pct = (analyzed_count / total_publications * 100) if total_publications > 0 else 0
+        
+        # Определяем Activity Balance
+        if author_status == "Analyzed Only":
+            activity_balance = "Publishing-Only"
+        elif author_status == "Citing Only":
+            activity_balance = "Citing-Only"
+        elif loyalty_score_pct >= 70:
+            activity_balance = "Publishing-Heavy"
+        elif loyalty_score_pct >= 30:
+            activity_balance = "Balanced"
+        else:
+            activity_balance = "Citing-Heavy"
+        
+        # Определяем Influence Level
+        if analyzed_count >= 10 or total_publications >= 20:
+            influence_level = "High"
+        elif citing_count >= 15:
+            influence_level = "Medium"
+        else:
+            influence_level = "Low"
+        
+        combined_data.append({
+            'Author': author,
+            'Total': total_publications,
+            'Status': author_status,
+            'Analyzed_Count': analyzed_count,
+            'Citing_Count': citing_count,
+            'Loyalty_Score': f"{loyalty_score_pct:.1f}%",
+            'Activity_Balance': activity_balance,
+            'Influence_Level': influence_level,
+            'Analyzed_Pct': round(analyzed_pct, 2),
+            'Citing_Pct': round(citing_pct, 2)
+        })
+    
+    # Сортируем по общему количеству публикаций (убывание)
+    combined_data.sort(key=lambda x: x['Total'], reverse=True)
+    
+    return combined_data
+
+def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affiliations_data, analyzed_total_mentions, citing_total_mentions):
+    """Создает объединенный лист аффилиаций анализируемых и цитирующих статей"""
+    
+    analyzed_affiliations = Counter(dict(analyzed_affiliations_data))
+    citing_affiliations = Counter(dict(citing_affiliations_data))
+    
+    combined_data = []
+    all_affiliations = set(analyzed_affiliations.keys()) | set(citing_affiliations.keys())
+    
+    for affiliation in all_affiliations:
+        analyzed_count = analyzed_affiliations.get(affiliation, 0)
+        citing_count = citing_affiliations.get(affiliation, 0)
+        total_mentions = analyzed_count + citing_count
+        
+        # Рассчитываем проценты
+        analyzed_pct = (analyzed_count / analyzed_total_mentions * 100) if analyzed_total_mentions > 0 else 0
+        citing_pct = (citing_count / citing_total_mentions * 100) if citing_total_mentions > 0 else 0
+        
+        # Определяем статус аффилиации
+        if analyzed_count > 0 and citing_count > 0:
+            affiliation_status = "Both"
+        elif analyzed_count > 0:
+            affiliation_status = "Analyzed Only"
+        else:
+            affiliation_status = "Citing Only"
+        
+        # Рассчитываем Engagement Score (процент публикаций от общей активности)
+        engagement_score_pct = (analyzed_count / total_mentions * 100) if total_mentions > 0 else 0
+        
+        # Определяем Activity Balance
+        if affiliation_status == "Analyzed Only":
+            activity_balance = "Publishing-Only"
+        elif affiliation_status == "Citing Only":
+            activity_balance = "Citing-Only"
+        elif engagement_score_pct >= 70:
+            activity_balance = "Publishing-Heavy"
+        elif engagement_score_pct >= 30:
+            activity_balance = "Balanced"
+        else:
+            activity_balance = "Citing-Heavy"
+        
+        # Определяем Network Type
+        if activity_balance == "Publishing-Heavy":
+            network_type = "Core Institution"
+        elif activity_balance == "Citing-Heavy":
+            network_type = "Research Hub"
+        elif activity_balance == "Balanced":
+            network_type = "Strategic Partner"
+        elif activity_balance == "Citing-Only":
+            network_type = "International Partner"
+        else:
+            network_type = "Local Partner"
+        
+        # Определяем Research Impact
+        if total_mentions >= 50:
+            research_impact = "Very High"
+        elif total_mentions >= 20:
+            research_impact = "High"
+        elif total_mentions >= 10:
+            research_impact = "Medium"
+        else:
+            research_impact = "Low"
+        
+        # Определяем Collaboration Potential
+        if network_type == "Strategic Partner" and total_mentions >= 30:
+            collaboration_potential = "Very High"
+        elif network_type in ["Research Hub", "International Partner"] and citing_count >= 20:
+            collaboration_potential = "High"
+        elif network_type == "Core Institution" and analyzed_count >= 15:
+            collaboration_potential = "Medium"
+        else:
+            collaboration_potential = "Low"
+        
+        combined_data.append({
+            'Affiliation': affiliation,
+            'Total': total_mentions,
+            'Status': affiliation_status,
+            'Analyzed_Count': analyzed_count,
+            'Citing_Count': citing_count,
+            'Engagement_Score': f"{engagement_score_pct:.1f}%",
+            'Activity_Balance': activity_balance,
+            'Network_Type': network_type,
+            'Research_Impact': research_impact,
+            'Collaboration_Potential': collaboration_potential,
+            'Analyzed_Pct': round(analyzed_pct, 2),
+            'Citing_Pct': round(citing_pct, 2)
+        })
+    
+    # Сортируем по общему количеству упоминаний (убывание)
+    combined_data.sort(key=lambda x: x['Total'], reverse=True)
+    
+    return combined_data
+
+def create_combined_countries_sheet(analyzed_countries_data, citing_countries_data, analyzed_total_mentions, citing_total_mentions):
+    """Создает объединенный лист стран анализируемых и цитирующих статей"""
+    
+    analyzed_countries = Counter(dict(analyzed_countries_data))
+    citing_countries = Counter(dict(citing_countries_data))
+    
+    combined_data = []
+    all_countries = set(analyzed_countries.keys()) | set(citing_countries.keys())
+    
+    for country in all_countries:
+        analyzed_count = analyzed_countries.get(country, 0)
+        citing_count = citing_countries.get(country, 0)
+        total_mentions = analyzed_count + citing_count
+        
+        # Рассчитываем проценты
+        analyzed_pct = (analyzed_count / analyzed_total_mentions * 100) if analyzed_total_mentions > 0 else 0
+        citing_pct = (citing_count / citing_total_mentions * 100) if citing_total_mentions > 0 else 0
+        
+        # Определяем статус страны
+        if analyzed_count > 0 and citing_count > 0:
+            country_status = "Both"
+        elif analyzed_count > 0:
+            country_status = "Analyzed Only"
+        else:
+            country_status = "Citing Only"
+        
+        # Рассчитываем Self-Sufficiency (доля локальной активности)
+        self_sufficiency_pct = (analyzed_count / total_mentions * 100) if total_mentions > 0 else 0
+        
+        # Рассчитываем Global Reach (доля международной активности)
+        global_reach_pct = (citing_count / total_mentions * 100) if total_mentions > 0 else 0
+        
+        # Определяем Development Stage
+        if self_sufficiency_pct >= 90:
+            development_stage = "Domestic Champion"
+        elif self_sufficiency_pct >= 70:
+            development_stage = "Regional Leader"
+        elif global_reach_pct >= 30:
+            development_stage = "Emerging International"
+        elif global_reach_pct >= 10:
+            development_stage = "Niche International"
+        else:
+            development_stage = "Minimal Presence"
+        
+        # Определяем Strategic Focus
+        if development_stage == "Emerging International" and global_reach_pct >= 40:
+            strategic_focus = "Expand"
+        elif development_stage in ["Niche International", "Emerging International"]:
+            strategic_focus = "Cultivate"
+        elif development_stage == "Domestic Champion":
+            strategic_focus = "Maintain"
+        elif development_stage == "Regional Leader":
+            strategic_focus = "Stabilize"
+        else:
+            strategic_focus = "Monitor"
+        
+        combined_data.append({
+            'Country': country,
+            'Total': total_mentions,
+            'Status': country_status,
+            'Analyzed_Count': analyzed_count,
+            'Citing_Count': citing_count,
+            'Self_Sufficiency': f"{self_sufficiency_pct:.1f}%",
+            'Global_Reach': f"{global_reach_pct:.1f}%",
+            'Development_Stage': development_stage,
+            'Strategic_Focus': strategic_focus,
+            'Analyzed_Pct': round(analyzed_pct, 2),
+            'Citing_Pct': round(citing_pct, 2)
+        })
+    
+    # Сортируем по общему количеству упоминаний (убывание)
+    combined_data.sort(key=lambda x: x['Total'], reverse=True)
+    
+    return combined_data
+
 # === 17. Enhanced Excel Report Creation ===
 def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
     """Create enhanced Excel report with error handling for large data"""
@@ -3896,108 +4141,45 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 citation_network_df = citation_network_df.sort_values(['Publication_Year', 'Citation_Year'])
                 citation_network_df.to_excel(writer, sheet_name='Citation_Network', index=False)
 
-            # Sheet 10: All authors analyzed (with percentages) - С НОРМАЛИЗАЦИЕЙ ИМЕН
-            if analyzed_stats['all_authors']:
-                all_authors_data = []
-                total_articles = safe_convert(analyzed_stats['n_items'])
-                
-                # Нормализуем имена авторов и объединяем счетчики
-                normalized_author_counts = Counter()
-                for author, count in analyzed_stats['all_authors']:
-                    normalized_name = normalize_author_name(author)
-                    normalized_author_counts[normalized_name] += count
-                
-                for author, count in normalized_author_counts.most_common():
-                    percentage = (safe_convert(count) / total_articles * 100) if total_articles > 0 else 0
-                    all_authors_data.append({
-                        'Author': safe_convert(author),
-                        'Articles_Count': safe_convert(count),
-                        'Percentage': round(percentage, 2)
-                    })
-                all_authors_df = pd.DataFrame(all_authors_data)
-                all_authors_df.to_excel(writer, sheet_name='All_Authors_Analyzed', index=False)
+            # === NEW COMBINED SHEETS ===
 
-            # Sheet 11: All authors citing (with percentages) - С НОРМАЛИЗАЦИЕЙ ИМЕН
-            if citing_stats['all_authors']:
-                all_citing_authors_data = []
-                total_citing_articles = safe_convert(citing_stats['n_items'])
-                
-                # Нормализуем имена авторов и объединяем счетчики
-                normalized_author_counts = Counter()
-                for author, count in citing_stats['all_authors']:
-                    normalized_name = normalize_author_name(author)
-                    normalized_author_counts[normalized_name] += count
-                
-                for author, count in normalized_author_counts.most_common():
-                    percentage = (safe_convert(count) / total_citing_articles * 100) if total_citing_articles > 0 else 0
-                    all_citing_authors_data.append({
-                        'Author': safe_convert(author),
-                        'Articles_Count': safe_convert(count),
-                        'Percentage': round(percentage, 2)
-                    })
-                all_citing_authors_df = pd.DataFrame(all_citing_authors_data)
-                all_citing_authors_df.to_excel(writer, sheet_name='All_Authors_Citing', index=False)
+            # Sheet 10: Combined Authors (REPLACES All_Authors_Analyzed and All_Authors_Citing)
+            combined_authors_data = create_combined_authors_sheet(
+                analyzed_stats['all_authors'],
+                citing_stats['all_authors'],
+                analyzed_stats['n_items'],
+                citing_stats['n_items']
+            )
+            if combined_authors_data:
+                combined_authors_df = pd.DataFrame(combined_authors_data)
+                combined_authors_df.to_excel(writer, sheet_name='Combined_Authors', index=False)
 
-            # Sheet 12: All affiliations analyzed (with percentages)
-            if analyzed_stats['all_affiliations']:
-                all_affiliations_data = []
-                total_mentions = sum(safe_convert(count) for _, count in analyzed_stats['all_affiliations'])
-                for affiliation, count in analyzed_stats['all_affiliations']:
-                    percentage = (safe_convert(count) / total_mentions * 100) if total_mentions > 0 else 0
-                    all_affiliations_data.append({
-                        'Affiliation': safe_convert(affiliation),
-                        'Mentions_Count': safe_convert(count),
-                        'Percentage': round(percentage, 2)
-                    })
-                all_affiliations_df = pd.DataFrame(all_affiliations_data)
-                all_affiliations_df.to_excel(writer, sheet_name='All_Affiliations_Analyzed', index=False)
+            # Sheet 11: Combined Affiliations (REPLACES All_Affiliations_Analyzed and All_Affiliations_Citing)
+            combined_affiliations_data = create_combined_affiliations_sheet(
+                analyzed_stats['all_affiliations'],
+                citing_stats['all_affiliations'],
+                sum(count for _, count in analyzed_stats['all_affiliations']),
+                sum(count for _, count in citing_stats['all_affiliations'])
+            )
+            if combined_affiliations_data:
+                combined_affiliations_df = pd.DataFrame(combined_affiliations_data)
+                combined_affiliations_df.to_excel(writer, sheet_name='Combined_Affiliations', index=False)
 
-            # Sheet 13: All affiliations citing (with percentages)
-            if citing_stats['all_affiliations']:
-                all_citing_affiliations_data = []
-                total_mentions = sum(safe_convert(count) for _, count in citing_stats['all_affiliations'])
-                for affiliation, count in citing_stats['all_affiliations']:
-                    percentage = (safe_convert(count) / total_mentions * 100) if total_mentions > 0 else 0
-                    all_citing_affiliations_data.append({
-                        'Affiliation': safe_convert(affiliation),
-                        'Mentions_Count': safe_convert(count),
-                        'Percentage': round(percentage, 2)
-                    })
-                all_citing_affiliations_df = pd.DataFrame(all_citing_affiliations_data)
-                all_citing_affiliations_df.to_excel(writer, sheet_name='All_Affiliations_Citing', index=False)
+            # Sheet 12: Combined Countries (REPLACES All_Countries_Analyzed and All_Countries_Citing)
+            combined_countries_data = create_combined_countries_sheet(
+                analyzed_stats['all_countries'],
+                citing_stats['all_countries'],
+                sum(count for _, count in analyzed_stats['all_countries']),
+                sum(count for _, count in citing_stats['all_countries'])
+            )
+            if combined_countries_data:
+                combined_countries_df = pd.DataFrame(combined_countries_data)
+                combined_countries_df.to_excel(writer, sheet_name='Combined_Countries', index=False)
 
-            # Sheet 14: All countries analyzed (with percentages)
-            if analyzed_stats['all_countries']:
-                all_countries_data = []
-                total_mentions = sum(safe_convert(count) for _, count in analyzed_stats['all_countries'])
-                for country, count in analyzed_stats['all_countries']:
-                    percentage = (safe_convert(count) / total_mentions * 100) if total_mentions > 0 else 0
-                    all_countries_data.append({
-                        'Country': safe_convert(country),
-                        'Mentions_Count': safe_convert(count),
-                        'Percentage': round(percentage, 2)
-                    })
-                all_countries_df = pd.DataFrame(all_countries_data)
-                all_countries_df.to_excel(writer, sheet_name='All_Countries_Analyzed', index=False)
-
-            # Sheet 15: All countries citing (with percentages)
-            if citing_stats['all_countries']:
-                all_citing_countries_data = []
-                total_mentions = sum(safe_convert(count) for _, count in citing_stats['all_countries'])
-                for country, count in citing_stats['all_countries']:
-                    percentage = (safe_convert(count) / total_mentions * 100) if total_mentions > 0 else 0
-                    all_citing_countries_data.append({
-                        'Country': safe_convert(country),
-                        'Mentions_Count': safe_convert(count),
-                        'Percentage': round(percentage, 2)
-                    })
-                all_citing_countries_df = pd.DataFrame(all_citing_countries_data)
-                all_citing_countries_df.to_excel(writer, sheet_name='All_Countries_Citing', index=False)
-
-            # Sheet 16: All journals citing (with percentages) - UPDATED VERSION WITH CS DATA
+            # Sheet 13: All journals citing (with percentages) - UPDATED VERSION WITH CS DATA
             if citing_stats['all_journals']:
                 all_citing_journals_data = []
-                total_articles = safe_convert(citing_stats['n_items'])
+                total_citing_articles = safe_convert(citing_stats['n_items'])
                 
                 # Load metrics data if not already loaded
                 if get_analysis_state().if_data is None or get_analysis_state().cs_data is None:
@@ -4006,7 +4188,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 for journal_info in citing_stats['all_journals']:
                     journal_name = journal_info[0]
                     count = journal_info[1]
-                    percentage = (safe_convert(count) / total_articles * 100) if total_articles > 0 else 0
+                    percentage = (safe_convert(count) / total_citing_articles * 100) if total_citing_articles > 0 else 0
                     
                     # Extract ISSNs for this journal from citing data
                     journal_issns = []
@@ -4049,7 +4231,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 all_citing_journals_df = pd.DataFrame(all_citing_journals_data)
                 all_citing_journals_df.to_excel(writer, sheet_name='All_Journals_Citing', index=False)
 
-            # Sheet 17: All publishers citing (with percentages)
+            # Sheet 14: All publishers citing (with percentages)
             if citing_stats['all_publishers']:
                 all_citing_publishers_data = []
                 total_articles = safe_convert(citing_stats['n_items'])
@@ -4063,7 +4245,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 all_citing_publishers_df = pd.DataFrame(all_citing_publishers_data)
                 all_citing_publishers_df.to_excel(writer, sheet_name='All_Publishers_Citing', index=False)
 
-            # Sheet 18: Fast metrics (NEW)
+            # Sheet 15: Fast metrics (NEW)
             fast_metrics_data = {
                 'Metric': [
                     'Reference Age (median)', 'Reference Age (mean)',
@@ -4119,7 +4301,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             fast_metrics_df = pd.DataFrame(fast_metrics_data)
             fast_metrics_df.to_excel(writer, sheet_name='Fast_Metrics', index=False)
 
-            # Sheet 19: Top concepts (NEW) - РАСШИРЕНО ДО 10 ТЕРМИНОВ
+            # Sheet 16: Top concepts (NEW) - РАСШИРЕНО ДО 10 ТЕРМИНОВ
             if fast_metrics.get('top_concepts'):
                 top_concepts_data = {
                     'Concept': [safe_convert(concept[0]) for concept in fast_metrics['top_concepts']],
@@ -4129,7 +4311,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 top_concepts_df.to_excel(writer, sheet_name='Top_Concepts', index=False)
 
             # === НОВЫЙ ЛИСТ: Объединенный анализ ключевых слов в названиях ===
-            # Sheet 20: Combined Title Keywords (NEW)
+            # Sheet 17: Combined Title Keywords (NEW)
             if 'title_keywords' in additional_data:
                 keywords_data = additional_data['title_keywords']
                 normalized_keywords = normalize_keywords_data(keywords_data)
@@ -4138,7 +4320,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     keywords_df = pd.DataFrame(normalized_keywords)
                     keywords_df.to_excel(writer, sheet_name='Title_Keywords', index=False)
 
-            # Sheet 21: Citation seasonality
+            # Sheet 18: Citation seasonality
             if 'citation_seasonality' in additional_data:
                 seasonality_data = []
                 citation_seasonality = additional_data['citation_seasonality']
@@ -4146,8 +4328,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 # Citation months
                 for month in range(1, 13):
                     month_name = datetime(2023, month, 1).strftime('%B')
-                    citation_count = safe_convert(citation_seasonality['citation_months'].get(month, 0))
-                    publication_count = safe_convert(citation_seasonality['publication_months'].get(month, 0))
+                    citation_count = safe_convert(citation_seasonality['citation_months'].get(m, 0))
+                    publication_count = safe_convert(citation_seasonality['publication_months'].get(m, 0))
                     
                     seasonality_data.append({
                         'Month_Number': safe_convert(month),
@@ -4174,7 +4356,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     optimal_months_df = pd.DataFrame(optimal_months_data)
                     optimal_months_df.to_excel(writer, sheet_name='Optimal_Publication_Months', index=False)
 
-            # Sheet 22: Potential reviewers
+            # Sheet 19: Potential reviewers
             if 'potential_reviewers' in additional_data:
                 reviewers_data = []
                 potential_reviewers_info = additional_data['potential_reviewers']
@@ -4192,7 +4374,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     reviewers_df = pd.DataFrame(reviewers_data)
                     reviewers_df.to_excel(writer, sheet_name='Potential_Reviewers', index=False)
 
-            # Sheet 23: Special Analysis Metrics (NEW)
+            # Sheet 20: Special Analysis Metrics (NEW)
             if 'special_analysis_metrics' in additional_data:
                 special_metrics = additional_data['special_analysis_metrics']
                 debug_info = special_metrics.get('debug_info', {})
@@ -5646,6 +5828,3 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
-
-
-
