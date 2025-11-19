@@ -2984,6 +2984,9 @@ class TitleKeywordsAnalyzer:
         content_words = []
 
         for word in words:
+            # ИСКЛЮЧАЕМ слово "sub"
+            if word == 'sub':
+                continue
             if '-' in word:
                 continue
             if len(word) > 2 and word not in self.stop_words:
@@ -3620,14 +3623,6 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         else:
             activity_balance = "Citing-Heavy"
         
-        # Определяем Influence Level
-        if analyzed_count >= 10 or total_publications >= 20:
-            influence_level = "High"
-        elif citing_count >= 15:
-            influence_level = "Medium"
-        else:
-            influence_level = "Low"
-        
         combined_data.append({
             'Author': author,
             'Total': total_publications,
@@ -3636,7 +3631,6 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
             'Citing_Count': citing_count,
             'Loyalty_Score': f"{loyalty_score_pct:.1f}%",
             'Activity_Balance': activity_balance,
-            'Influence_Level': influence_level,
             'Analyzed_Pct': round(analyzed_pct, 2),
             'Citing_Pct': round(citing_pct, 2)
         })
@@ -3687,38 +3681,6 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
         else:
             activity_balance = "Citing-Heavy"
         
-        # Определяем Network Type
-        if activity_balance == "Publishing-Heavy":
-            network_type = "Core Institution"
-        elif activity_balance == "Citing-Heavy":
-            network_type = "Research Hub"
-        elif activity_balance == "Balanced":
-            network_type = "Strategic Partner"
-        elif activity_balance == "Citing-Only":
-            network_type = "International Partner"
-        else:
-            network_type = "Local Partner"
-        
-        # Определяем Research Impact
-        if total_mentions >= 50:
-            research_impact = "Very High"
-        elif total_mentions >= 20:
-            research_impact = "High"
-        elif total_mentions >= 10:
-            research_impact = "Medium"
-        else:
-            research_impact = "Low"
-        
-        # Определяем Collaboration Potential
-        if network_type == "Strategic Partner" and total_mentions >= 30:
-            collaboration_potential = "Very High"
-        elif network_type in ["Research Hub", "International Partner"] and citing_count >= 20:
-            collaboration_potential = "High"
-        elif network_type == "Core Institution" and analyzed_count >= 15:
-            collaboration_potential = "Medium"
-        else:
-            collaboration_potential = "Low"
-        
         combined_data.append({
             'Affiliation': affiliation,
             'Total': total_mentions,
@@ -3727,9 +3689,6 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
             'Citing_Count': citing_count,
             'Engagement_Score': f"{engagement_score_pct:.1f}%",
             'Activity_Balance': activity_balance,
-            'Network_Type': network_type,
-            'Research_Impact': research_impact,
-            'Collaboration_Potential': collaboration_potential,
             'Analyzed_Pct': round(analyzed_pct, 2),
             'Citing_Pct': round(citing_pct, 2)
         })
@@ -3771,30 +3730,6 @@ def create_combined_countries_sheet(analyzed_countries_data, citing_countries_da
         # Рассчитываем Global Reach (доля международной активности)
         global_reach_pct = (citing_count / total_mentions * 100) if total_mentions > 0 else 0
         
-        # Определяем Development Stage
-        if self_sufficiency_pct >= 90:
-            development_stage = "Domestic Champion"
-        elif self_sufficiency_pct >= 70:
-            development_stage = "Regional Leader"
-        elif global_reach_pct >= 30:
-            development_stage = "Emerging International"
-        elif global_reach_pct >= 10:
-            development_stage = "Niche International"
-        else:
-            development_stage = "Minimal Presence"
-        
-        # Определяем Strategic Focus
-        if development_stage == "Emerging International" and global_reach_pct >= 40:
-            strategic_focus = "Expand"
-        elif development_stage in ["Niche International", "Emerging International"]:
-            strategic_focus = "Cultivate"
-        elif development_stage == "Domestic Champion":
-            strategic_focus = "Maintain"
-        elif development_stage == "Regional Leader":
-            strategic_focus = "Stabilize"
-        else:
-            strategic_focus = "Monitor"
-        
         combined_data.append({
             'Country': country,
             'Total': total_mentions,
@@ -3803,8 +3738,6 @@ def create_combined_countries_sheet(analyzed_countries_data, citing_countries_da
             'Citing_Count': citing_count,
             'Self_Sufficiency': f"{self_sufficiency_pct:.1f}%",
             'Global_Reach': f"{global_reach_pct:.1f}%",
-            'Development_Stage': development_stage,
-            'Strategic_Focus': strategic_focus,
             'Analyzed_Pct': round(analyzed_pct, 2),
             'Citing_Pct': round(citing_pct, 2)
         })
@@ -4328,8 +4261,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 # Citation months
                 for month in range(1, 13):
                     month_name = datetime(2023, month, 1).strftime('%B')
-                    citation_count = safe_convert(citation_seasonality['citation_months'].get(month, 0))
-                    publication_count = safe_convert(citation_seasonality['publication_months'].get(month, 0))
+                    citation_count = safe_convert(citation_seasonality['citation_months'].get(m, 0))
+                    publication_count = safe_convert(citation_seasonality['publication_months'].get(m, 0))
                     
                     seasonality_data.append({
                         'Month_Number': safe_convert(month),
@@ -4472,25 +4405,25 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
             with col1:
                 st.metric(
                     "CiteScore", 
-                    f"{special_metrics.get('cite_score', 0):.3f}",
+                    f"{special_metrics.get('cite_score', 0):.2f}",
                     help="A/B: Total citations (A) / Total articles (B) in Special Analysis period"
                 )
             with col2:
                 st.metric(
                     "CiteScore Corrected", 
-                    f"{special_metrics.get('cite_score_corrected', 0):.3f}",
+                    f"{special_metrics.get('cite_score_corrected', 0):.2f}",
                     help="C/B: Scopus-indexed citations (C) / Total articles (B)"
                 )
             with col3:
                 st.metric(
                     "Impact Factor", 
-                    f"{special_metrics.get('impact_factor', 0):.3f}",
+                    f"{special_metrics.get('impact_factor', 0):.2f}",
                     help="E/D: Total citations (E) / Total articles (D) in IF calculation period"
                 )
             with col4:
                 st.metric(
                     "Impact Factor Corrected", 
-                    f"{special_metrics.get('impact_factor_corrected', 0):.3f}",
+                    f"{special_metrics.get('impact_factor_corrected', 0):.2f}",
                     help="F/D: WoS-indexed citations (F) / Total articles (D)"
                 )
     
@@ -4502,14 +4435,14 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
                         st.write(f"- B (Articles): {debug_info.get('B', 0)}")
                         st.write(f"- A (Citations): {debug_info.get('A', 0)}")
                         st.write(f"- C (Scopus Citations): {debug_info.get('C', 0)}")
-                        st.write(f"- CiteScore: {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = {special_metrics.get('cite_score', 0):.3f}")
+                        st.write(f"- CiteScore: {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = {special_metrics.get('cite_score', 0):.2f}")
                     
                     with col2:
                         st.write("**Impact Factor Calculation:**")
                         st.write(f"- D (Articles): {debug_info.get('D', 0)}")
                         st.write(f"- E (Citations): {debug_info.get('E', 0)}")
                         st.write(f"- F (WoS Citations): {debug_info.get('F', 0)}")
-                        st.write(f"- Impact Factor: {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = {special_metrics.get('impact_factor', 0):.3f}")
+                        st.write(f"- Impact Factor: {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = {special_metrics.get('impact_factor', 0):.2f}")
         
         col1, col2, col3, col4 = st.columns(4)
         
@@ -5751,28 +5684,28 @@ def main():
                 with col1:
                     st.metric(
                         "CiteScore", 
-                        f"{special_metrics.get('cite_score', 0):.3f}",
+                        f"{special_metrics.get('cite_score', 0):.2f}",
                         delta=None,
                         help="Total citations (A) / Total articles (B) in Special Analysis period"
                     )
                 with col2:
                     st.metric(
                         "CiteScore Corrected", 
-                        f"{special_metrics.get('cite_score_corrected', 0):.3f}",
+                        f"{special_metrics.get('cite_score_corrected', 0):.2f}",
                         delta=None,
                         help="Scopus-indexed citations (C) / Total articles (B)"
                     )
                 with col3:
                     st.metric(
                         "Impact Factor", 
-                        f"{special_metrics.get('impact_factor', 0):.3f}",
+                        f"{special_metrics.get('impact_factor', 0):.2f}",
                         delta=None,
                         help="Total citations (E) / Total articles (D) in IF calculation period"
                     )
                 with col4:
                     st.metric(
                         "Impact Factor Corrected", 
-                        f"{special_metrics.get('impact_factor_corrected', 0):.3f}",
+                        f"{special_metrics.get('impact_factor_corrected', 0):.2f}",
                         delta=None,
                         help="WoS-indexed citations (F) / Total articles (D)"
                     )
@@ -5786,16 +5719,16 @@ def main():
                         st.write(f"**B (Total Articles):** {debug_info.get('B', 0)}")
                         st.write(f"**A (Total Citations):** {debug_info.get('A', 0)}")
                         st.write(f"**C (Scopus Citations):** {debug_info.get('C', 0)}")
-                        st.write(f"**CiteScore:** {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = **{special_metrics.get('cite_score', 0):.3f}**")
-                        st.write(f"**CiteScore Corrected:** {debug_info.get('C', 0)} / {debug_info.get('B', 0)} = **{special_metrics.get('cite_score_corrected', 0):.3f}**")
+                        st.write(f"**CiteScore:** {debug_info.get('A', 0)} / {debug_info.get('B', 0)} = **{special_metrics.get('cite_score', 0):.2f}**")
+                        st.write(f"**CiteScore Corrected:** {debug_info.get('C', 0)} / {debug_info.get('B', 0)} = **{special_metrics.get('cite_score_corrected', 0):.2f}**")
                     
                     with col2:
                         st.subheader("Impact Factor Calculation")
                         st.write(f"**D (IF Articles):** {debug_info.get('D', 0)}")
                         st.write(f"**E (IF Citations):** {debug_info.get('E', 0)}")
                         st.write(f"**F (WoS Citations):** {debug_info.get('F', 0)}")
-                        st.write(f"**Impact Factor:** {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = **{special_metrics.get('impact_factor', 0):.3f}**")
-                        st.write(f"**Impact Factor Corrected:** {debug_info.get('F', 0)} / {debug_info.get('D', 0)} = **{special_metrics.get('impact_factor_corrected', 0):.3f}**")
+                        st.write(f"**Impact Factor:** {debug_info.get('E', 0)} / {debug_info.get('D', 0)} = **{special_metrics.get('impact_factor', 0):.2f}**")
+                        st.write(f"**Impact Factor Corrected:** {debug_info.get('F', 0)} / {debug_info.get('D', 0)} = **{special_metrics.get('impact_factor_corrected', 0):.2f}**")
                 
                 # Interpretation guidance
                 with st.expander("💡 Interpretation Guide", expanded=False):
@@ -5828,4 +5761,3 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
-
