@@ -3464,10 +3464,10 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             # Initialize citing article usage tracking if not exists
             if citing_doi not in citing_articles_usage:
                 citing_articles_usage[citing_doi] = {
-                    'used_for_sc': False,
-                    'used_for_sc_corr': False,
-                    'used_for_if': False,
-                    'used_for_if_corr': False
+                    'used_for_sc': True,  # или False в зависимости от условий
+                    'used_for_sc_corr': True,  # или False  
+                    'used_for_if': True,  # или False
+                    'used_for_if_corr': True  # или False
                 }
             
             # Get citing work publication date
@@ -3813,8 +3813,12 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             # Sheet 2: Citing works (with optimization) - UPDATED WITH 4 NEW COLUMNS
             citing_list = []
             
-            # Get citing articles usage from special analysis metrics
-            citing_articles_usage = special_metrics.get('debug_info', {}).get('citing_articles_usage', {})
+            # Get citing articles usage from special analysis metrics - FIXED LOGIC
+            citing_usage_dict = {}
+            if 'special_analysis_metrics' in additional_data:
+                debug_info = additional_data['special_analysis_metrics'].get('debug_info', {})
+                citing_usage_dict = debug_info.get('citing_articles_usage', {})
+                print(f"🔍 DEBUG: Loaded citing_usage_dict with {len(citing_usage_dict)} entries for Citing_Works sheet")
             
             for i, item in enumerate(citing_data):
                 if i >= MAX_ROWS:
@@ -3826,7 +3830,13 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     journal_info = extract_journal_info(item)
                     
                     citing_doi = cr.get('DOI', '')
-                    usage_info = citing_articles_usage.get(citing_doi, {})
+                    
+                    # FIXED: Properly extract usage information from citing_usage_dict
+                    usage_info = citing_usage_dict.get(citing_doi, {})
+                    
+                    # Debug output for first few records
+                    if i < 5 and citing_doi:
+                        print(f"🔍 Citing_Works DEBUG - Item {i}: DOI={citing_doi}, usage_info={usage_info}")
                     
                     citing_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -3844,7 +3854,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
                         'Work_Type': safe_convert(cr.get('type', ''))[:50],
-                        # NEW: 4 columns for special analysis usage
+                        # FIXED: 4 columns for special analysis usage - using proper dictionary access
                         'Used for SC': '×' if usage_info.get('used_for_sc') else '',
                         'Used for SC_corr': '×' if usage_info.get('used_for_sc_corr') else '',
                         'Used for IF': '×' if usage_info.get('used_for_if') else '',
@@ -5751,3 +5761,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
