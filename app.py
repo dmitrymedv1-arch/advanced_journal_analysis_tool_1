@@ -798,6 +798,146 @@ class AnalysisState:
         self.openalex_client = OpenAlexClient(self.config, self.logger, self.cache_manager)
         self.data_processor = DataProcessor(self.logger)
         self.metrics_calculator = MetricsCalculator(self.logger)
+        
+        # NEW: Optimized ISSN sets for fast lookup
+        self.scopus_issn_set = None
+        self.wos_issn_set = None
+        self.special_analysis_citing_cache = {}
+
+# =============================================================================
+# OPTIMIZED ISSN LOOKUP FUNCTIONS
+# =============================================================================
+
+def load_indexed_issn_sets():
+    """Load Scopus and WoS ISSN sets for fast lookup - optimized version"""
+    state = get_analysis_state()
+    
+    if state.scopus_issn_set is not None and state.wos_issn_set is not None:
+        return  # Already loaded
+    
+    scopus_set = set()
+    wos_set = set()
+    
+    # Load Scopus data from CS.xlsx
+    try:
+        if state.cs_data is not None and not state.cs_data.empty:
+            cs_df = state.cs_data
+            # Check available columns
+            available_cols = cs_df.columns.tolist()
+            issn_cols = []
+            
+            # Look for ISSN columns
+            for col in available_cols:
+                if 'issn' in col.lower() or 'ISSN' in col:
+                    issn_cols.append(col)
+            
+            if not issn_cols:
+                # Try common column names
+                for possible_col in ['Print ISSN', 'E-ISSN', 'ISSN', 'eISSN']:
+                    if possible_col in available_cols:
+                        issn_cols.append(possible_col)
+            
+            if not issn_cols:
+                st.warning("No ISSN columns found in Scopus data")
+            else:
+                for col in issn_cols:
+                    for val in cs_df[col].dropna():
+                        clean = str(val).replace('-', '').strip()
+                        if len(clean) == 8 and clean.isalnum():
+                            scopus_set.add(clean)
+                print(f"✅ Loaded {len(scopus_set)} unique ISSN from Scopus")
+        else:
+            print("⚠️ No Scopus data available")
+    except Exception as e:
+        print(f"❌ Scopus ISSN loading error: {e}")
+    
+    # Load WoS data from IF.xlsx  
+    try:
+        if state.if_data is not None and not state.if_data.empty:
+            if_df = state.if_data
+            available_cols = if_df.columns.tolist()
+            issn_cols = []
+            
+            # Look for ISSN columns
+            for col in available_cols:
+                if 'issn' in col.lower() or 'ISSN' in col:
+                    issn_cols.append(col)
+            
+            if not issn_cols:
+                # Try common column names
+                for possible_col in ['ISSN', 'eISSN', 'Print-ISSN', 'E-ISSN']:
+                    if possible_col in available_cols:
+                        issn_cols.append(possible_col)
+            
+            if not issn_cols:
+                st.warning("No ISSN columns found in WoS data")
+            else:
+                for col in issn_cols:
+                    for val in if_df[col].dropna():
+                        clean = str(val).replace('-', '').strip()
+                        if len(clean) == 8 and clean.isalnum():
+                            wos_set.add(clean)
+                print(f"✅ Loaded {len(wos_set)} unique ISSN from WoS")
+        else:
+            print("⚠️ No WoS data available")
+    except Exception as e:
+        print(f"❌ WoS ISSN loading error: {e}")
+    
+    # Convert to frozenset for fastest lookup
+    state.scopus_issn_set = frozenset(scopus_set)
+    state.wos_issn_set = frozenset(wos_set)
+    
+    print(f"🎯 Final sets: Scopus {len(scopus_set)} ISSN, WoS {len(wos_set)} ISSN")
+
+def is_from_scopus_or_wos(citing_article) -> tuple[bool, bool]:
+    """Check if citing article is from Scopus or WoS - optimized version"""
+    state = get_analysis_state()
+    
+    # Fast extraction of all ISSN from OpenAlex + Crossref
+    issns = set()
+    
+    # First try OpenAlex (usually more reliable)
+    if citing_article.get('openalex'):
+        venues = citing_article['openalex'].get('host_venue', {}) or {}
+        
+        # Extract ISSN from OpenAlex
+        issn_list = venues.get('issn', [])
+        if isinstance(issn_list, str):
+            issn_list = [issn_list]
+        
+        for i in issn_list:
+            if i:
+                clean = str(i).replace('-', '').strip()
+                if len(clean) == 8 and clean.isalnum():
+                    issns.add(clean)
+        
+        # Also try issn_l
+        issn_l = venues.get('issn_l')
+        if issn_l:
+            clean = str(issn_l).replace('-', '').strip()
+            if len(clean) == 8 and clean.isalnum():
+                issns.add(clean)
+    
+    # Crossref fallback if no ISSNs found
+    if not issns and citing_article.get('crossref'):
+        cr_issns = citing_article['crossref'].get('ISSN', [])
+        if isinstance(cr_issns, str):
+            cr_issns = [cr_issns]
+        
+        for i in cr_issns:
+            if i:
+                clean = str(i).replace('-', '').strip()
+                if len(clean) == 8 and clean.isalnum():
+                    issns.add(clean)
+    
+    if not issns:
+        return False, False
+    
+    # Fast lookup in preloaded sets
+    scopus_hit = any(issn in state.scopus_issn_set for issn in issns)
+    wos_hit = any(issn in state.wos_issn_set for issn in issns)
+    
+    return scopus_hit, wos_hit
 
 # =============================================================================
 # ORIGINAL CODE (PRESERVED)
@@ -3234,74 +3374,9 @@ def normalize_keywords_data(keywords_data):
     
     return normalized_data
 
-# === NEW FUNCTION FOR SPECIAL ANALYSIS METRICS ===
-def create_issn_lookup_cache():
-    """Создает кэш для быстрого поиска ISSN в базах данных"""
-    state = get_analysis_state()
-    
-    # Кэш для Scopus (CS.xlsx)
-    scopus_issn_cache = set()
-    if not state.cs_data.empty:
-        print("🔍 Building Scopus ISSN cache...")
-        for col in ['Print ISSN', 'E-ISSN']:
-            if col in state.cs_data.columns:
-                issns = state.cs_data[col].dropna().astype(str)
-                for issn in issns:
-                    normalized = normalize_issn_for_comparison(issn)
-                    if normalized and len(normalized) == 8:
-                        scopus_issn_cache.add(normalized)
-        print(f"✅ Scopus cache built: {len(scopus_issn_cache)} ISSNs")
-    
-    # Кэш для WoS (IF.xlsx)
-    wos_issn_cache = set()
-    if not state.if_data.empty:
-        print("🔍 Building WoS ISSN cache...")
-        for col in ['ISSN', 'eISSN']:
-            if col in state.if_data.columns:
-                issns = state.if_data[col].dropna().astype(str)
-                for issn in issns:
-                    normalized = normalize_issn_for_comparison(issn)
-                    if normalized and len(normalized) == 8:
-                        wos_issn_cache.add(normalized)
-        print(f"✅ WoS cache built: {len(wos_issn_cache)} ISSNs")
-    
-    return scopus_issn_cache, wos_issn_cache
-
-def get_all_issns_from_work(work):
-    """Быстро извлекает все ISSN из работы"""
-    issns = set()
-    if not work:
-        return issns
-        
-    cr = work.get('crossref')
-    oa = work.get('openalex')
-    
-    if cr:
-        cr_issns = cr.get('ISSN', [])
-        if isinstance(cr_issns, str):
-            cr_issns = [cr_issns]
-        for issn in cr_issns:
-            if issn:
-                normalized = normalize_issn_for_comparison(issn)
-                if normalized:
-                    issns.add(normalized)
-    
-    if oa:
-        host_venue = oa.get('host_venue', {})
-        if host_venue:
-            oa_issns = host_venue.get('issn', [])
-            if isinstance(oa_issns, str):
-                oa_issns = [oa_issns]
-            for issn in oa_issns:
-                if issn:
-                    normalized = normalize_issn_for_comparison(issn)
-                    if normalized:
-                        issns.add(normalized)
-    
-    return issns
-
-def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state):
-    """Calculate CiteScore and Impact Factor metrics for Special Analysis mode"""
+# === OPTIMIZED SPECIAL ANALYSIS METRICS CALCULATION ===
+def calculate_special_analysis_metrics_fast(analyzed_metadata, all_citing_metadata, state):
+    """Calculate CiteScore and Impact Factor metrics for Special Analysis mode - OPTIMIZED VERSION"""
     
     # Initialize metrics with default values
     special_metrics = {
@@ -3315,6 +3390,9 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     # Check if we're in Special Analysis mode
     if not state.is_special_analysis:
         return special_metrics
+    
+    # Load indexed ISSN sets for fast lookup
+    load_indexed_issn_sets()
     
     # Get current date for time window calculations
     current_date = datetime.now()
@@ -3337,10 +3415,6 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     print(f"   CiteScore: {cs_start_date.date()} to {cs_end_date.date()}")
     print(f"   IF Analyzed: {if_analyzed_start.date()} to {if_analyzed_end.date()}")
     print(f"   IF Citing: {if_citing_start.date()} to {if_citing_end.date()}")
-    
-    # Create ISSN lookup cache for fast searching
-    scopus_issn_cache, wos_issn_cache = create_issn_lookup_cache()
-    print(f"📊 ISSN cache sizes - Scopus: {len(scopus_issn_cache)}, WoS: {len(wos_issn_cache)}")
     
     # Initialize counters
     B = 0  # Articles for CiteScore (published in CS window)
@@ -3430,57 +3504,68 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     print(f"📈 Articles for CiteScore (B): {B}")
     print(f"📈 Articles for Impact Factor (D): {D}")
     
-    # Step 2: Process citing works and citations - COUNT EACH CITATION SEPARATELY
+    # Step 2: Process citing works and citations - COUNT EACH CITATION SEPARATELY WITH OPTIMIZED ISSN LOOKUP
     print(f"🔍 Processing citations for {len(analyzed_metadata)} analyzed articles...")
     
     total_citations_processed = 0
+    scopus_cites = 0
+    wos_cites = 0
     
-    for analyzed in analyzed_metadata:
-        if not analyzed or not analyzed.get('crossref'):
+    progress_bar = st.progress(0)
+    status = st.empty()
+    
+    for i, citing in enumerate(all_citing_metadata):
+        if not citing:
             continue
             
-        analyzed_doi = analyzed['crossref'].get('DOI')
-        if not analyzed_doi:
+        citing_doi = citing.get('doi')
+        if not citing_doi:
             continue
-            
-        # Get analyzed article publication date
-        analyzed_pub_date = get_publication_date(analyzed)
-        if not analyzed_pub_date:
-            continue
-            
-        # Get citing works for this analyzed article
-        citings = state.citing_cache.get(analyzed_doi, [])
         
-        for citing in citings:
-            if not citing:
+        total_citations_processed += 1
+        
+        # Initialize citing article usage tracking if not exists
+        if citing_doi not in citing_articles_usage:
+            citing_articles_usage[citing_doi] = {
+                'used_for_sc': False,
+                'used_for_sc_corr': False,
+                'used_for_if': False,
+                'used_for_if_corr': False
+            }
+        
+        # Get citing work publication date
+        citing_pub_date = None
+        citing_pub_date_str = citing.get('pub_date')
+        if citing_pub_date_str:
+            try:
+                citing_pub_date = datetime.fromisoformat(citing_pub_date_str.replace('Z', '+00:00'))
+            except:
+                # Try to get from OpenAlex data
+                citing_pub_date = get_publication_date(citing)
+        
+        if not citing_pub_date:
+            continue
+        
+        # OPTIMIZED: Check if citing work is in Scopus/WoS using cached lookup
+        citing_doi_key = citing_doi or str(id(citing))
+        if citing_doi_key in state.special_analysis_citing_cache:
+            is_scopus, is_wos = state.special_analysis_citing_cache[citing_doi_key]
+        else:
+            is_scopus, is_wos = is_from_scopus_or_wos(citing)
+            state.special_analysis_citing_cache[citing_doi_key] = (is_scopus, is_wos)
+        
+        # Process each analyzed article that this citing work references
+        for analyzed in analyzed_metadata:
+            if not analyzed or not analyzed.get('crossref'):
                 continue
                 
-            citing_doi = citing.get('doi')
-            if not citing_doi:
+            analyzed_doi = analyzed['crossref'].get('DOI')
+            if not analyzed_doi:
                 continue
-            
-            total_citations_processed += 1
-            
-            # Initialize citing article usage tracking if not exists
-            if citing_doi not in citing_articles_usage:
-                citing_articles_usage[citing_doi] = {
-                    'used_for_sc': True,  # или False в зависимости от условий
-                    'used_for_sc_corr': True,  # или False  
-                    'used_for_if': True,  # или False
-                    'used_for_if_corr': True  # или False
-                }
-            
-            # Get citing work publication date
-            citing_pub_date = None
-            citing_pub_date_str = citing.get('pub_date')
-            if citing_pub_date_str:
-                try:
-                    citing_pub_date = datetime.fromisoformat(citing_pub_date_str.replace('Z', '+00:00'))
-                except:
-                    # Try to get from OpenAlex data
-                    citing_pub_date = get_publication_date(citing)
-            
-            if not citing_pub_date:
+                
+            # Get analyzed article publication date
+            analyzed_pub_date = get_publication_date(analyzed)
+            if not analyzed_pub_date:
                 continue
             
             # CiteScore calculations (A and C) - COUNT EACH CITATION
@@ -3493,16 +3578,14 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                 A += 1
                 analyzed_articles_usage[analyzed_doi]['cs_citations_count'] += 1
                 citation_details['cs_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
-                citing_articles_usage[citing_doi]['used_for_sc'] = True  # NEW: Mark citing article for SC
+                citing_articles_usage[citing_doi]['used_for_sc'] = True
                 
-                # FAST CHECK: Check if citing work is in Scopus using cache
-                citing_issns = get_all_issns_from_work(citing)
-                in_scopus = any(issn in scopus_issn_cache for issn in citing_issns)
-                
-                if in_scopus:
+                # Check if citing work is in Scopus
+                if is_scopus:
                     C += 1
+                    scopus_cites += 1
                     citation_details['cs_scopus_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
-                    citing_articles_usage[citing_doi]['used_for_sc_corr'] = True  # NEW: Mark citing article for SC_corr
+                    citing_articles_usage[citing_doi]['used_for_sc_corr'] = True
             
             # Impact Factor calculations (E and F) - COUNT EACH CITATION
             # Analyzed article in IF publication window, citing work in IF citation window
@@ -3514,16 +3597,22 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                 E += 1
                 analyzed_articles_usage[analyzed_doi]['if_citations_count'] += 1
                 citation_details['if_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
-                citing_articles_usage[citing_doi]['used_for_if'] = True  # NEW: Mark citing article for IF
+                citing_articles_usage[citing_doi]['used_for_if'] = True
                 
-                # FAST CHECK: Check if citing work is in WoS using cache
-                citing_issns = get_all_issns_from_work(citing)
-                in_wos = any(issn in wos_issn_cache for issn in citing_issns)
-                
-                if in_wos:
+                # Check if citing work is in WoS
+                if is_wos:
                     F += 1
+                    wos_cites += 1
                     citation_details['if_wos_citations'].append((analyzed_doi, citing_doi, analyzed_pub_date.date(), citing_pub_date.date()))
-                    citing_articles_usage[citing_doi]['used_for_if_corr'] = True  # NEW: Mark citing article for IF_corr
+                    citing_articles_usage[citing_doi]['used_for_if_corr'] = True
+        
+        # Update progress every 50 iterations
+        if i % 50 == 0:
+            progress_bar.progress((i + 1) / len(all_citing_metadata))
+            status.text(f"Processed: {i + 1}/{len(all_citing_metadata)} | Scopus: {scopus_cites}, WoS: {wos_cites}")
+    
+    progress_bar.empty()
+    status.empty()
     
     print(f"📊 Citation Processing Complete:")
     print(f"   Total citations processed: {total_citations_processed}")
@@ -3545,20 +3634,22 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
         'E': E,
         'F': F,
         'analyzed_articles_usage': analyzed_articles_usage,
-        'citing_articles_usage': citing_articles_usage,  # NEW: Include citing articles usage
+        'citing_articles_usage': citing_articles_usage,
         'citation_details': citation_details,
         'total_cs_citations': len(citation_details['cs_citations']),
         'total_cs_scopus_citations': len(citation_details['cs_scopus_citations']),
         'total_if_citations': len(citation_details['if_citations']),
         'total_if_wos_citations': len(citation_details['if_wos_citations']),
         'total_citations_processed': total_citations_processed,
-        'scopus_cache_size': len(scopus_issn_cache),
-        'wos_cache_size': len(wos_issn_cache)
+        'scopus_issn_count': len(state.scopus_issn_set) if state.scopus_issn_set else 0,
+        'wos_issn_count': len(state.wos_issn_set) if state.wos_issn_set else 0,
+        'caching_efficiency': f"{len(state.special_analysis_citing_cache)} unique citing works cached"
     }
     
     print(f"🎯 Final Metrics:")
     print(f"   CiteScore: {special_metrics['cite_score']} (Corrected: {special_metrics['cite_score_corrected']})")
     print(f"   Impact Factor: {special_metrics['impact_factor']} (Corrected: {special_metrics['impact_factor_corrected']})")
+    print(f"   Caching stats: {len(state.special_analysis_citing_cache)} unique citing works processed")
     
     return special_metrics
 
@@ -3813,12 +3904,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             # Sheet 2: Citing works (with optimization) - UPDATED WITH 4 NEW COLUMNS
             citing_list = []
             
-            # Get citing articles usage from special analysis metrics - FIXED LOGIC
-            citing_usage_dict = {}
-            if 'special_analysis_metrics' in additional_data:
-                debug_info = additional_data['special_analysis_metrics'].get('debug_info', {})
-                citing_usage_dict = debug_info.get('citing_articles_usage', {})
-                print(f"🔍 DEBUG: Loaded citing_usage_dict with {len(citing_usage_dict)} entries for Citing_Works sheet")
+            # Get citing articles usage from special analysis metrics
+            citing_articles_usage = special_metrics.get('debug_info', {}).get('citing_articles_usage', {})
             
             for i, item in enumerate(citing_data):
                 if i >= MAX_ROWS:
@@ -3830,13 +3917,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     journal_info = extract_journal_info(item)
                     
                     citing_doi = cr.get('DOI', '')
-                    
-                    # FIXED: Properly extract usage information from citing_usage_dict
-                    usage_info = citing_usage_dict.get(citing_doi, {})
-                    
-                    # Debug output for first few records
-                    if i < 5 and citing_doi:
-                        print(f"🔍 Citing_Works DEBUG - Item {i}: DOI={citing_doi}, usage_info={usage_info}")
+                    usage_info = citing_articles_usage.get(citing_doi, {})
                     
                     citing_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -3854,7 +3935,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
                         'Work_Type': safe_convert(cr.get('type', ''))[:50],
-                        # FIXED: 4 columns for special analysis usage - using proper dictionary access
+                        # NEW: 4 columns for special analysis usage
                         'Used for SC': '×' if usage_info.get('used_for_sc') else '',
                         'Used for SC_corr': '×' if usage_info.get('used_for_sc_corr') else '',
                         'Used for IF': '×' if usage_info.get('used_for_if') else '',
@@ -5119,11 +5200,11 @@ def analyze_journal(issn, period_str, special_analysis=False):
     overall_status.text(translation_manager.get_text('calculating_fast_metrics'))
     fast_metrics = calculate_all_fast_metrics(analyzed_metadata, all_citing_metadata, state, issn)
     
-    # Special Analysis metrics calculation (NEW)
+    # Special Analysis metrics calculation (NEW) - USING OPTIMIZED VERSION
     special_analysis_metrics = {}
     if state.is_special_analysis:
         overall_status.text("Calculating Special Analysis metrics...")
-        special_analysis_metrics = calculate_special_analysis_metrics(analyzed_metadata, all_citing_metadata, state)
+        special_analysis_metrics = calculate_special_analysis_metrics_fast(analyzed_metadata, all_citing_metadata, state)
     
     # === NEW ADDITIONAL ANALYSES ===
     overall_status.text("Calculating additional insights...")
