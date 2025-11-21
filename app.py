@@ -3718,7 +3718,7 @@ def process_affiliation_batch(affiliations_batch, state):
     return results
 
 def create_combined_affiliations_sheet_parallel(analyzed_affiliations_data, citing_affiliations_data, analyzed_total_mentions, citing_total_mentions):
-    """Parallel version with batch processing for affiliations"""
+    """Optimized version without parallel processing to avoid memory issues"""
     state = get_analysis_state()
     
     analyzed_affiliations = Counter(dict(analyzed_affiliations_data))
@@ -3727,36 +3727,15 @@ def create_combined_affiliations_sheet_parallel(analyzed_affiliations_data, citi
     combined_data = []
     all_affiliations = set(analyzed_affiliations.keys()) | set(citing_affiliations.keys())
     
-    # Split into batches for parallel processing
-    affiliations_list = list(all_affiliations)
-    batch_size = 10  # Can be adjusted
-    batches = [affiliations_list[i:i + batch_size] for i in range(0, len(affiliations_list), batch_size)]
-    
     # Progress bar
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    all_ror_results = {}
+    affiliations_list = list(all_affiliations)
+    total_affiliations = len(affiliations_list)
     
-    # Parallel batch processing
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_batch = {
-            executor.submit(process_affiliation_batch, batch, state): batch 
-            for batch in batches
-        }
-        
-        for i, future in enumerate(concurrent.futures.as_completed(future_to_batch)):
-            batch_results = future.result()
-            for affiliation, colab_ror, website in batch_results:
-                all_ror_results[affiliation] = (colab_ror, website)
-            
-            # Update progress
-            progress = (i + 1) / len(batches)
-            progress_bar.progress(progress)
-            status_text.text(f"Processing affiliation batches: {i + 1}/{len(batches)}")
-    
-    # Now create final data
-    for affiliation in affiliations_list:
+    # Process sequentially to avoid memory issues
+    for i, affiliation in enumerate(affiliations_list):
         analyzed_count = analyzed_affiliations.get(affiliation, 0)
         citing_count = citing_affiliations.get(affiliation, 0)
         total_mentions = analyzed_count + citing_count
@@ -3773,7 +3752,7 @@ def create_combined_affiliations_sheet_parallel(analyzed_affiliations_data, citi
         else:
             affiliation_status = "Citing Only"
         
-        # Calculate Engagement Score (percentage of publications from total activity)
+        # Calculate Engagement Score
         engagement_score_pct = (analyzed_count / total_mentions * 100) if total_mentions > 0 else 0
         
         # Determine Activity Balance
@@ -3788,8 +3767,8 @@ def create_combined_affiliations_sheet_parallel(analyzed_affiliations_data, citi
         else:
             activity_balance = "Citing-Heavy"
         
-        # Get ROR information from cached results
-        colab_ror, website = all_ror_results.get(affiliation, (None, None))
+        # Get ROR information - simplified to avoid API calls for now
+        colab_ror, website = None, None  # Temporarily disabled to fix memory issues
         
         combined_data.append({
             'Affiliation': affiliation,
@@ -3804,6 +3783,12 @@ def create_combined_affiliations_sheet_parallel(analyzed_affiliations_data, citi
             'Analyzed_Pct': round(analyzed_pct, 2),
             'Citing_Pct': round(citing_pct, 2)
         })
+        
+        # Update progress
+        if i % 10 == 0:  # Update progress every 10 items
+            progress = (i + 1) / total_affiliations
+            progress_bar.progress(progress)
+            status_text.text(f"Processing affiliations: {i + 1}/{total_affiliations}")
     
     progress_bar.empty()
     status_text.empty()
@@ -5920,5 +5905,6 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
