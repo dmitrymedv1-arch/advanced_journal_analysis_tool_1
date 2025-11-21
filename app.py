@@ -800,6 +800,342 @@ class AnalysisState:
         self.metrics_calculator = MetricsCalculator(self.logger)
 
 # =============================================================================
+# OPTIMIZED ROR SERVICE
+# =============================================================================
+
+class RORService:
+    """Optimized service for ROR API with parallel requests and smart matching"""
+    
+    def __init__(self, max_workers=8, requests_per_second=5):
+        self.max_workers = max_workers
+        self.requests_per_second = requests_per_second
+        self.session = None
+        self.last_request_time = 0
+        self.lock = threading.Lock()
+        self.request_count = 0
+    
+    def get_session(self):
+        """Get or create requests session with connection pooling"""
+        if self.session is None:
+            self.session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=20, 
+                pool_maxsize=30,
+                max_retries=3,
+                pool_block=False
+            )
+            self.session.mount('http://', adapter)
+            self.session.mount('https://', adapter)
+            # Set default headers
+            self.session.headers.update({
+                'User-Agent': 'JournalAnalysisTool/1.0',
+                'Accept': 'application/json'
+            })
+        return self.session
+    
+    def _rate_limit(self):
+        """Rate limiting for ROR API to avoid being blocked"""
+        with self.lock:
+            current_time = time.time()
+            time_since_last = current_time - self.last_request_time
+            min_interval = 1.0 / self.requests_per_second
+            
+            if time_since_last < min_interval:
+                sleep_time = min_interval - time_since_last
+                time.sleep(sleep_time)
+            
+            self.last_request_time = time.time()
+            self.request_count += 1
+    
+    def search_ror_organization_batch(self, affiliation_names):
+        """Batch search for ROR organizations with parallel processing"""
+        results = {}
+        
+        if not affiliation_names:
+            return results
+        
+        # Filter out empty affiliations
+        valid_affiliations = [aff for aff in affiliation_names if aff and str(aff).strip()]
+        
+        if not valid_affiliations:
+            return results
+        
+        # Setup progress tracking
+        total_affiliations = len(valid_affiliations)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Process in parallel with ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, total_affiliations)) as executor:
+            # Create future mapping
+            future_to_affiliation = {
+                executor.submit(self._search_single_ror, aff): aff 
+                for aff in valid_affiliations
+            }
+            
+            completed = 0
+            for future in as_completed(future_to_affiliation):
+                affiliation = future_to_affiliation[future]
+                try:
+                    colab_ror, website = future.result()
+                    results[affiliation] = (colab_ror, website)
+                except Exception as e:
+                    print(f"Error searching ROR for {affiliation}: {str(e)}")
+                    results[affiliation] = (None, None)
+                
+                completed += 1
+                progress = completed / total_affiliations
+                progress_bar.progress(progress)
+                status_text.text(f"Searching ROR data: {completed}/{total_affiliations} affiliations")
+        
+        # Cleanup progress bars
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Print statistics
+        successful_searches = sum(1 for v in results.values() if v[0] is not None)
+        print(f"✅ ROR search completed: {successful_searches}/{total_affiliations} successful")
+        print(f"📊 ROR requests made: {self.request_count}")
+        
+        return results
+    
+    def _search_single_ror(self, affiliation_name):
+        """Search for single organization with optimized matching"""
+        try:
+            if not affiliation_name or not str(affiliation_name).strip():
+                return None, None
+            
+            # Apply rate limiting
+            self._rate_limit()
+            
+            # Use smart matching based on affiliation type
+            aff_lower = str(affiliation_name).lower().strip()
+            
+            # Fast path for academic institutions
+            if self._is_academic_institution(aff_lower):
+                return self._fast_ror_search(affiliation_name)
+            else:
+                return self._standard_ror_search(affiliation_name)
+                
+        except Exception as e:
+            print(f"Error in _search_single_ror for {affiliation_name}: {str(e)}")
+            return None, None
+    
+    def _is_academic_institution(self, affiliation_lower):
+        """Check if affiliation is likely an academic institution"""
+        academic_keywords = [
+            'university', 'college', 'institute', 'academy', 'school', 
+            'universität', 'universitat', 'université', 'universita',
+            'polytechnic', 'technical', 'research', 'laboratory', 'lab ',
+            'faculty', 'department', 'center for', 'centre for'
+        ]
+        return any(keyword in affiliation_lower for keyword in academic_keywords)
+    
+    def _fast_ror_search(self, affiliation_name):
+        """Fast search for academic institutions with exact matching"""
+        session = self.get_session()
+        
+        url = "https://api.ror.org/organizations"
+        params = {
+            'query': affiliation_name.strip(),
+            'page': 1,
+            'items': 3  # Limit results for speed
+        }
+        
+        try:
+            response = session.get(url, params=params, timeout=8)
+            response.raise_for_status()
+            
+            items = response.json().get('items', [])
+            if not items:
+                return None, None
+            
+            # Quick exact matching for academic institutions
+            query_clean = self._clean_affiliation_name(affiliation_name)
+            
+            for item in items:
+                name = self._clean_affiliation_name(item.get('name', ''))
+                
+                # Fast matching heuristics
+                if self._quick_name_match(query_clean, name):
+                    return self._extract_ror_info(item)
+            
+            # Fallback: return first result if no exact match
+            return self._extract_ror_info(items[0])
+            
+        except requests.exceptions.Timeout:
+            print(f"ROR timeout for: {affiliation_name}")
+            return None, None
+        except requests.exceptions.RequestException as e:
+            print(f"ROR request error for {affiliation_name}: {str(e)}")
+            return None, None
+        except Exception as e:
+            print(f"Unexpected ROR error for {affiliation_name}: {str(e)}")
+            return None, None
+    
+    def _standard_ror_search(self, affiliation_name):
+        """Standard search with comprehensive matching"""
+        session = self.get_session()
+        
+        url = "https://api.ror.org/organizations"
+        params = {'query': affiliation_name.strip()}
+        
+        try:
+            response = session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            items = response.json().get('items', [])
+            if not items:
+                return None, None
+            
+            # Comprehensive matching with scoring
+            best_match = None
+            best_score = -1
+            query_clean = self._clean_affiliation_name(affiliation_name)
+            
+            for item in items:
+                name = self._clean_affiliation_name(item.get('name', ''))
+                score = self._calculate_match_score(query_clean, name, item)
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = item
+            
+            # Return match if score is above threshold
+            if best_match and best_score > 30:
+                return self._extract_ror_info(best_match)
+            else:
+                return None, None
+                
+        except requests.exceptions.Timeout:
+            print(f"ROR timeout for: {affiliation_name}")
+            return None, None
+        except requests.exceptions.RequestException as e:
+            print(f"ROR request error for {affiliation_name}: {str(e)}")
+            return None, None
+        except Exception as e:
+            print(f"Unexpected ROR error for {affiliation_name}: {str(e)}")
+            return None, None
+    
+    def _clean_affiliation_name(self, name):
+        """Clean affiliation name for comparison"""
+        if not name:
+            return ""
+        
+        # Convert to lowercase and remove extra spaces
+        cleaned = ' '.join(str(name).lower().split())
+        
+        # Remove common stop words
+        stop_words = {'the', 'university', 'institute', 'college', 'of', 'and', 'for', 'at', 'in', 'on'}
+        words = cleaned.split()
+        filtered_words = [w for w in words if w not in stop_words]
+        
+        return ' '.join(filtered_words)
+    
+    def _quick_name_match(self, query, target):
+        """Quick name matching for academic institutions"""
+        if not query or not target:
+            return False
+        
+        # Exact match
+        if query == target:
+            return True
+        
+        # Contains match
+        if query in target or target in query:
+            return True
+        
+        # Word overlap match
+        query_words = set(query.split())
+        target_words = set(target.split())
+        common_words = query_words & target_words
+        
+        return len(common_words) >= 2  # At least 2 common words
+    
+    def _calculate_match_score(self, query, target, item):
+        """Calculate matching score between query and target"""
+        if not query or not target:
+            return 0
+        
+        score = 0
+        
+        # Exact match
+        if query == target:
+            score += 100
+        
+        # Contains match
+        elif query in target:
+            score += 80
+        elif target in query:
+            score += 70
+        
+        # Word overlap
+        query_words = set(query.split())
+        target_words = set(target.split())
+        common_words = query_words & target_words
+        
+        if common_words:
+            score += len(common_words) * 15
+        
+        # Boost score for academic institutions
+        types = item.get('types', [])
+        if any(t in ['Education', 'University', 'Institute', 'Research'] for t in types):
+            score += 20
+        
+        # Boost score for established organizations
+        established = item.get('established')
+        if established and established < 2000:  # Older than 2000
+            score += 10
+        
+        return score
+    
+    def _extract_ror_info(self, item):
+        """Extract ROR information from API response"""
+        if not item:
+            return None, None
+        
+        try:
+            # Extract ROR ID and Colab link
+            ror_id = item['id'].split('/')[-1]
+            colab_url = f"https://colab.ws/organizations/{ror_id}"
+            
+            # Extract website
+            website = None
+            links = item.get('links', []) or []
+            
+            for link in links:
+                if isinstance(link, dict):
+                    url = link.get('value') or link.get('url')
+                else:
+                    url = str(link)
+                
+                if url and isinstance(url, str):
+                    url = url.strip()
+                    if url.startswith(('http://', 'https://')):
+                        website = url
+                        break
+                    elif '.' in url and len(url) > 3:
+                        website = 'https://' + url
+                        break
+            
+            return colab_url, website
+            
+        except Exception as e:
+            print(f"Error extracting ROR info: {str(e)}")
+            return None, None
+    
+    def get_stats(self):
+        """Get service statistics"""
+        return {
+            'total_requests': self.request_count,
+            'max_workers': self.max_workers,
+            'requests_per_second': self.requests_per_second
+        }
+
+# Initialize global ROR service
+ror_service = RORService(max_workers=8, requests_per_second=5)
+
+# =============================================================================
 # ORIGINAL CODE (PRESERVED)
 # =============================================================================
 
@@ -3687,6 +4023,74 @@ def search_ror_organization_cached(affiliation_name, cache_dict):
     cache_dict[cache_key] = (colab_ror, website)
     
     return colab_ror, website
+
+# === OPTIMIZED VERSION OF COMBINED AFFILIATIONS SHEET ===
+def create_combined_affiliations_sheet_fast(analyzed_affiliations_data, citing_affiliations_data, analyzed_total_mentions, citing_total_mentions):
+    """Fast version of combined affiliations sheet using optimized ROR service"""
+    
+    analyzed_affiliations = Counter(dict(analyzed_affiliations_data))
+    citing_affiliations = Counter(dict(citing_affiliations_data))
+    
+    combined_data = []
+    all_affiliations = set(analyzed_affiliations.keys()) | set(citing_affiliations.keys())
+    
+    # Use optimized ROR service for batch searching
+    affiliation_list = list(all_affiliations)
+    ror_results = ror_service.search_ror_organization_batch(affiliation_list)
+    
+    for affiliation in all_affiliations:
+        analyzed_count = analyzed_affiliations.get(affiliation, 0)
+        citing_count = citing_affiliations.get(affiliation, 0)
+        total_mentions = analyzed_count + citing_count
+        
+        # Рассчитываем проценты
+        analyzed_pct = (analyzed_count / analyzed_total_mentions * 100) if analyzed_total_mentions > 0 else 0
+        citing_pct = (citing_count / citing_total_mentions * 100) if citing_total_mentions > 0 else 0
+        
+        # Определяем статус аффилиации
+        if analyzed_count > 0 and citing_count > 0:
+            affiliation_status = "Both"
+        elif analyzed_count > 0:
+            affiliation_status = "Analyzed Only"
+        else:
+            affiliation_status = "Citing Only"
+        
+        # Рассчитываем Engagement Score (процент публикаций от общей активности)
+        engagement_score_pct = (analyzed_count / total_mentions * 100) if total_mentions > 0 else 0
+        
+        # Определяем Activity Balance
+        if affiliation_status == "Analyzed Only":
+            activity_balance = "Publishing-Only"
+        elif affiliation_status == "Citing Only":
+            activity_balance = "Citing-Only"
+        elif engagement_score_pct >= 70:
+            activity_balance = "Publishing-Heavy"
+        elif engagement_score_pct >= 30:
+            activity_balance = "Balanced"
+        else:
+            activity_balance = "Citing-Heavy"
+        
+        # Get ROR information from optimized service results
+        colab_ror, website = ror_results.get(affiliation, (None, None))
+        
+        combined_data.append({
+            'Affiliation': affiliation,
+            'Colab-ROR': colab_ror if colab_ror else '',
+            'Website': website if website else '',
+            'Total': total_mentions,
+            'Status': affiliation_status,
+            'Analyzed_Count': analyzed_count,
+            'Citing_Count': citing_count,
+            'Engagement_Score': f"{engagement_score_pct:.1f}%",
+            'Activity_Balance': activity_balance,
+            'Analyzed_Pct': round(analyzed_pct, 2),
+            'Citing_Pct': round(citing_pct, 2)
+        })
+    
+    # Сортируем по общему количеству упоминаний (убывание)
+    combined_data.sort(key=lambda x: x['Total'], reverse=True)
+    
+    return combined_data
     
 def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles):
     """Создает объединенный лист авторов анализируемых и цитирующих статей"""
@@ -4217,7 +4621,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 combined_authors_df.to_excel(writer, sheet_name='Combined_Authors', index=False)
 
             # Sheet 11: Combined Affiliations (REPLACES All_Affiliations_Analyzed and All_Affiliations_Citing)
-            combined_affiliations_data = create_combined_affiliations_sheet(
+            # USE OPTIMIZED VERSION HERE
+            combined_affiliations_data = create_combined_affiliations_sheet_fast(
                 analyzed_stats['all_affiliations'],
                 citing_stats['all_affiliations'],
                 sum(count for _, count in analyzed_stats['all_affiliations']),
@@ -5890,5 +6295,3 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
-
-
