@@ -3395,28 +3395,53 @@ def calculate_special_analysis_metrics_fast(analyzed_metadata, all_citing_metada
     if_citing_start = current_date - timedelta(days=534)
     if_citing_end   = current_date - timedelta(days=170)
     
+    # Вспомогательные функции внутри основной функции
+    def _extract_publication_date(crossref_data):
+        """Extract publication date from Crossref data"""
+        if not crossref_data:
+            return None
+        date_parts = crossref_data.get('published', {}).get('date-parts', [[]])[0]
+        if date_parts and len(date_parts) >= 1:
+            try:
+                year = date_parts[0]
+                month = date_parts[1] if len(date_parts) > 1 else 1
+                day = date_parts[2] if len(date_parts) > 2 else 1
+                return datetime(year, month, day)
+            except (ValueError, TypeError):
+                pass
+        return None
+    
+    def _extract_citing_publication_date(citing_data):
+        """Extract publication date from citing data"""
+        if not citing_data:
+            return None
+            
+        # Try to get from Crossref data first
+        if citing_data.get('crossref'):
+            return _extract_publication_date(citing_data.get('crossref'))
+        
+        # Try to get from OpenAlex data
+        if citing_data.get('openalex') and citing_data['openalex'].get('publication_date'):
+            try:
+                return datetime.fromisoformat(citing_data['openalex']['publication_date'].replace('Z', '+00:00'))
+            except:
+                pass
+                
+        # Try to get from pub_date field
+        if citing_data.get('pub_date'):
+            try:
+                return datetime.fromisoformat(citing_data['pub_date'].replace('Z', '+00:00'))
+            except:
+                pass
+                
+        return None
+    
     # === СЧИТАЕМ ЗНАМЕНАТЕЛИ ===
     B = sum(1 for a in analyzed_metadata 
             if a.get('crossref') and _extract_publication_date(a.get('crossref')) and cs_start <= _extract_publication_date(a.get('crossref')) <= cs_end)
     
     D = sum(1 for a in analyzed_metadata 
             if a.get('crossref') and _extract_publication_date(a.get('crossref')) and if_analyzed_start <= _extract_publication_date(a.get('crossref')) <= if_analyzed_end)
-
-# Добавляем вспомогательную функцию для извлечения даты публикации
-def _extract_publication_date(crossref_data):
-    """Extract publication date from Crossref data"""
-    if not crossref_data:
-        return None
-    date_parts = crossref_data.get('published', {}).get('date-parts', [[]])[0]
-    if date_parts and len(date_parts) >= 1:
-        try:
-            year = date_parts[0]
-            month = date_parts[1] if len(date_parts) > 1 else 1
-            day = date_parts[2] if len(date_parts) > 2 else 1
-            return datetime(year, month, day)
-        except (ValueError, TypeError):
-            pass
-    return None
     
     # === СЧИТАЕМ ЧИСЛИТЕЛИ — ЭТО ПРОСТО СЧЁТ ЦИТИРУЮЩИХ СТАТЕЙ! ===
     A = 0  # все цитирования в окне CiteScore
@@ -3428,43 +3453,20 @@ def _extract_publication_date(crossref_data):
         pub_date = _extract_citing_publication_date(citing)
         if not pub_date:
             continue
-
-# Добавляем еще одну вспомогательную функцию для цитирующих статей
-def _extract_citing_publication_date(citing_data):
-    """Extract publication date from citing data"""
-    if not citing_data:
-        return None
-        
-    # Try to get from Crossref data first
-    if citing_data.get('crossref'):
-        return _extract_publication_date(citing_data.get('crossref'))
-    
-    # Try to get from OpenAlex data
-    if citing_data.get('openalex') and citing_data['openalex'].get('publication_date'):
-        try:
-            return datetime.fromisoformat(citing_data['openalex']['publication_date'].replace('Z', '+00:00'))
-        except:
-            pass
-            
-    # Try to get from pub_date field
-    if citing_data.get('pub_date'):
-        try:
-            return datetime.fromisoformat(citing_data['pub_date'].replace('Z', '+00:00'))
-        except:
-            pass
-            
-    return None
             
         # CiteScore: цитирующая статья должна быть опубликована в последние ~4 года
         if cs_start <= pub_date <= cs_end:
             A += 1
-            if citing.journal_issn in scopus_issn_set:  # у тебя есть load_indexed_issn_sets()
+            # Нужно получить ISSN цитирующей статьи
+            citing_issn = _extract_citing_issn(citing)
+            if citing_issn and citing_issn in state.scopus_issn_set:
                 C += 1
                 
         # Impact Factor: цитирующая статья должна быть из 2025 года (или текущего года)
         if if_citing_start <= pub_date <= if_citing_end:
             E += 1
-            if citing.journal_issn in wos_issn_set:
+            citing_issn = _extract_citing_issn(citing)
+            if citing_issn and citing_issn in state.wos_issn_set:
                 F += 1
     
     # === РАСЧЁТ МЕТРИК ===
@@ -3482,6 +3484,28 @@ def _extract_citing_publication_date(citing_data):
         'impact_factor_corrected': round(impact_factor_corrected, 2),
         'debug_info': debug_info
     }
+
+# Добавляем функцию извлечения ISSN для цитирующих статей
+def _extract_citing_issn(citing_data):
+    """Extract ISSN from citing data"""
+    if not citing_data:
+        return None
+        
+    # Try Crossref data
+    if citing_data.get('crossref'):
+        issns = citing_data['crossref'].get('ISSN', [])
+        if issns and isinstance(issns, list) and len(issns) > 0:
+            return issns[0].replace('-', '').upper()
+    
+    # Try OpenAlex data
+    if citing_data.get('openalex'):
+        host_venue = citing_data['openalex'].get('host_venue', {})
+        if host_venue:
+            issn = host_venue.get('issn')
+            if issn:
+                return issn.replace('-', '').upper()
+    
+    return None
     
     # Helper function to extract publication date from metadata
     def get_publication_date(metadata):
@@ -5888,6 +5912,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
