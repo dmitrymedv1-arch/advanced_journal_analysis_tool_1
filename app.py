@@ -3397,10 +3397,26 @@ def calculate_special_analysis_metrics_fast(analyzed_metadata, all_citing_metada
     
     # === СЧИТАЕМ ЗНАМЕНАТЕЛИ ===
     B = sum(1 for a in analyzed_metadata 
-            if a.publication_date and cs_start <= a.publication_date <= cs_end)
+            if a.get('crossref') and _extract_publication_date(a.get('crossref')) and cs_start <= _extract_publication_date(a.get('crossref')) <= cs_end)
     
     D = sum(1 for a in analyzed_metadata 
-            if a.publication_date and if_analyzed_start <= a.publication_date <= if_analyzed_end)
+            if a.get('crossref') and _extract_publication_date(a.get('crossref')) and if_analyzed_start <= _extract_publication_date(a.get('crossref')) <= if_analyzed_end)
+
+# Добавляем вспомогательную функцию для извлечения даты публикации
+def _extract_publication_date(crossref_data):
+    """Extract publication date from Crossref data"""
+    if not crossref_data:
+        return None
+    date_parts = crossref_data.get('published', {}).get('date-parts', [[]])[0]
+    if date_parts and len(date_parts) >= 1:
+        try:
+            year = date_parts[0]
+            month = date_parts[1] if len(date_parts) > 1 else 1
+            day = date_parts[2] if len(date_parts) > 2 else 1
+            return datetime(year, month, day)
+        except (ValueError, TypeError):
+            pass
+    return None
     
     # === СЧИТАЕМ ЧИСЛИТЕЛИ — ЭТО ПРОСТО СЧЁТ ЦИТИРУЮЩИХ СТАТЕЙ! ===
     A = 0  # все цитирования в окне CiteScore
@@ -3409,9 +3425,35 @@ def calculate_special_analysis_metrics_fast(analyzed_metadata, all_citing_metada
     F = 0  # только из WoS-индексированных журналов
     
     for citing in all_citing_metadata:
-        pub_date = citing.publication_date
+        pub_date = _extract_citing_publication_date(citing)
         if not pub_date:
             continue
+
+# Добавляем еще одну вспомогательную функцию для цитирующих статей
+def _extract_citing_publication_date(citing_data):
+    """Extract publication date from citing data"""
+    if not citing_data:
+        return None
+        
+    # Try to get from Crossref data first
+    if citing_data.get('crossref'):
+        return _extract_publication_date(citing_data.get('crossref'))
+    
+    # Try to get from OpenAlex data
+    if citing_data.get('openalex') and citing_data['openalex'].get('publication_date'):
+        try:
+            return datetime.fromisoformat(citing_data['openalex']['publication_date'].replace('Z', '+00:00'))
+        except:
+            pass
+            
+    # Try to get from pub_date field
+    if citing_data.get('pub_date'):
+        try:
+            return datetime.fromisoformat(citing_data['pub_date'].replace('Z', '+00:00'))
+        except:
+            pass
+            
+    return None
             
         # CiteScore: цитирующая статья должна быть опубликована в последние ~4 года
         if cs_start <= pub_date <= cs_end:
@@ -5846,5 +5888,6 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
