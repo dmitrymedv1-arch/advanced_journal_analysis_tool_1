@@ -3669,6 +3669,25 @@ def search_ror_organization(affiliation_name):
         print(f"🚨 Error searching ROR for '{affiliation_name}': {str(e)}")
         return None, None
 
+def search_ror_organization_cached(affiliation_name, cache_dict):
+    """Cached version of ROR search to avoid duplicate API calls"""
+    if not affiliation_name:
+        return None, None
+        
+    # Use cache to avoid duplicate API calls
+    cache_key = affiliation_name.strip().lower()
+    
+    if cache_key in cache_dict:
+        return cache_dict[cache_key]
+    
+    # Perform search
+    colab_ror, website = search_ror_organization(affiliation_name)
+    
+    # Cache the result
+    cache_dict[cache_key] = (colab_ror, website)
+    
+    return colab_ror, website
+    
 def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles):
     """Создает объединенный лист авторов анализируемых и цитирующих статей"""
     
@@ -5871,4 +5890,5 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
