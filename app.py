@@ -3376,65 +3376,69 @@ def normalize_keywords_data(keywords_data):
 
 # === OPTIMIZED SPECIAL ANALYSIS METRICS CALCULATION ===
 def calculate_special_analysis_metrics_fast(analyzed_metadata, all_citing_metadata, state):
-    """Calculate CiteScore and Impact Factor metrics for Special Analysis mode - OPTIMIZED VERSION"""
-    
-    # Initialize metrics with default values
-    special_metrics = {
-        'cite_score': 0,
-        'cite_score_corrected': 0,
-        'impact_factor': 0,
-        'impact_factor_corrected': 0,
-        'debug_info': {}
-    }
-    
-    # Check if we're in Special Analysis mode
     if not state.is_special_analysis:
-        return special_metrics
+        return {'cite_score': 0, 'cite_score_corrected': 0, 'impact_factor': 0, 'impact_factor_corrected': 0, 'debug_info': {}}
     
-    # Load indexed ISSN sets for fast lookup
-    load_indexed_issn_sets()
+    load_indexed_issn_sets()  # оставляем как есть
     
-    # Get current date for time window calculations
     current_date = datetime.now()
     
-    # Define time windows for Special Analysis
-    # CiteScore windows (1580 to 120 days ago)
-    cs_start_date = current_date - timedelta(days=1580)
-    cs_end_date = current_date - timedelta(days=120)
+    # Окна для CiteScore (примерно 4 года назад → 4 месяца назад)
+    cs_start = current_date - timedelta(days=1580)
+    cs_end   = current_date - timedelta(days=120)
     
-    # Impact Factor windows
-    # Analyzed articles: 1265 to 535 days ago
+    # Окно для статей, идущих в знаменатель Impact Factor (2023–2024, если сейчас 2025)
     if_analyzed_start = current_date - timedelta(days=1265)
-    if_analyzed_end = current_date - timedelta(days=535)
+    if_analyzed_end   = current_date - timedelta(days=535)
     
-    # Citing works: 534 to 170 days ago  
+    # Окно для цитирующих статей Impact Factor (2025 год)
     if_citing_start = current_date - timedelta(days=534)
-    if_citing_end = current_date - timedelta(days=170)
+    if_citing_end   = current_date - timedelta(days=170)
     
-    print(f"🔍 Special Analysis Date Windows:")
-    print(f"   CiteScore: {cs_start_date.date()} to {cs_end_date.date()}")
-    print(f"   IF Analyzed: {if_analyzed_start.date()} to {if_analyzed_end.date()}")
-    print(f"   IF Citing: {if_citing_start.date()} to {if_citing_end.date()}")
+    # === СЧИТАЕМ ЗНАМЕНАТЕЛИ ===
+    B = sum(1 for a in analyzed_metadata 
+            if a.publication_date and cs_start <= a.publication_date <= cs_end)
     
-    # Initialize counters
-    B = 0  # Articles for CiteScore (published in CS window)
-    A = 0  # All citations for CiteScore (COUNTING EACH CITATION)
-    C = 0  # Citations from Scopus-indexed journals for CiteScore (COUNTING EACH CITATION)
+    D = sum(1 for a in analyzed_metadata 
+            if a.publication_date and if_analyzed_start <= a.publication_date <= if_analyzed_end)
     
-    D = 0  # Articles for Impact Factor (published in IF window)
-    E = 0  # All citations for Impact Factor (COUNTING EACH CITATION) 
-    F = 0  # Citations from WoS-indexed journals for Impact Factor (COUNTING EACH CITATION)
+    # === СЧИТАЕМ ЧИСЛИТЕЛИ — ЭТО ПРОСТО СЧЁТ ЦИТИРУЮЩИХ СТАТЕЙ! ===
+    A = 0  # все цитирования в окне CiteScore
+    C = 0  # только из Scopus-индексированных журналов
+    E = 0  # все цитирования в окне IF
+    F = 0  # только из WoS-индексированных журналов
     
-    # Track which articles are used for metrics (for Excel reporting)
-    analyzed_articles_usage = {}
-    citing_articles_usage = {}  # NEW: Track citing articles usage
+    for citing in all_citing_metadata:
+        pub_date = citing.publication_date
+        if not pub_date:
+            continue
+            
+        # CiteScore: цитирующая статья должна быть опубликована в последние ~4 года
+        if cs_start <= pub_date <= cs_end:
+            A += 1
+            if citing.journal_issn in scopus_issn_set:  # у тебя есть load_indexed_issn_sets()
+                C += 1
+                
+        # Impact Factor: цитирующая статья должна быть из 2025 года (или текущего года)
+        if if_citing_start <= pub_date <= if_citing_end:
+            E += 1
+            if citing.journal_issn in wos_issn_set:
+                F += 1
     
-    # Detailed citation tracking - count each citation separately
-    citation_details = {
-        'cs_citations': [],  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for CiteScore
-        'cs_scopus_citations': [],  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for Scopus-corrected CiteScore
-        'if_citations': [],  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for Impact Factor
-        'if_wos_citations': []  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for WoS-corrected Impact Factor
+    # === РАСЧЁТ МЕТРИК ===
+    cite_score = A / B if B > 0 else 0
+    cite_score_corrected = C / B if B > 0 else 0
+    impact_factor = E / D if D > 0 else 0
+    impact_factor_corrected = F / D if D > 0 else 0
+    
+    debug_info = {'A': A, 'B': B, 'C': C, 'D': D, 'E': E, 'F': F}
+    
+    return {
+        'cite_score': round(cite_score, 2),
+        'cite_score_corrected': round(cite_score_corrected, 2),
+        'impact_factor': round(impact_factor, 2),
+        'impact_factor_corrected': round(impact_factor_corrected, 2),
+        'debug_info': debug_info
     }
     
     # Helper function to extract publication date from metadata
@@ -5842,4 +5846,5 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
