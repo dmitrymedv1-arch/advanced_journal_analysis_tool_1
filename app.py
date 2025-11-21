@@ -3567,108 +3567,126 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
 # === NEW FUNCTIONS FOR COMBINED SHEETS ===
 
 def search_ror_organization(affiliation_name):
-    """Search for organization in ROR database and return best match with improved matching"""
+    """Enhanced ROR search with better matching and error handling"""
     try:
         if not affiliation_name or affiliation_name.strip() == '':
+            print(f"❌ Empty affiliation name")
             return None, None
             
-        print(f"🔍 Searching ROR for: '{affiliation_name}'")
+        clean_affiliation = affiliation_name.strip()
+        print(f"🔍 Searching ROR for: '{clean_affiliation}'")
         
         # Search ROR API
         url = "https://api.ror.org/organizations"
-        params = {'query': affiliation_name.strip()}
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
+        params = {'query': clean_affiliation}
         
-        items = response.json().get('items', [])
+        try:
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print(f"🚨 ROR API request failed: {str(e)}")
+            return None, None
+        
+        data = response.json()
+        items = data.get('items', [])
         print(f"📊 Found {len(items)} potential matches")
         
         if not items:
+            print(f"❌ No matches found for '{clean_affiliation}'")
             return None, None
         
-        # Find best match using improved fuzzy matching
+        # Improved matching logic
         best_match = None
-        best_score = -1
+        best_score = 0
+        query_lower = clean_affiliation.lower()
         
-        query_lower = affiliation_name.strip().lower()
-        
-        for i, item in enumerate(items):
+        for item in items:
             name = item.get('name', '').lower()
             aliases = [a.lower() for a in item.get('aliases', [])]
-            acronyms = [a.lower() for a in item.get('acronyms', []) if a]
+            acronyms = [a.lower() for a in item.get('acronyms', [])]
             
             # All possible name variations
             all_names = [name] + aliases + acronyms
             
-            # Calculate score for each name variation
             for test_name in all_names:
+                if not test_name:
+                    continue
+                    
                 score = 0
                 
-                # Exact match
+                # Exact match (highest priority)
                 if query_lower == test_name:
-                    score = 10000
-                # Contains query
-                elif query_lower in test_name:
-                    score = 8000
-                # Query contains organization name
-                elif test_name in query_lower:
-                    score = 7000
-                # Fuzzy matching
+                    score = 100
+                    print(f"🎯 Exact match found: {test_name}")
+                    break
+                
+                # Contains match
+                elif query_lower in test_name or test_name in query_lower:
+                    score = 80
+                
+                # Fuzzy matching with improved scoring
                 else:
                     try:
                         from thefuzz import fuzz
-                        score = fuzz.token_set_ratio(query_lower, test_name)
-                        # Boost score for longer matches
-                        if len(test_name) > 10:
-                            score = int(score * 1.1)
+                        ratio = fuzz.token_set_ratio(query_lower, test_name)
+                        score = ratio / 100.0 * 60  # Normalize to 0-60 scale
                     except ImportError:
-                        # Fallback simple matching
-                        common_words = len(set(query_lower.split()) & set(test_name.split()))
-                        score = common_words * 20
+                        # Simple word overlap as fallback
+                        query_words = set(query_lower.split())
+                        test_words = set(test_name.split())
+                        common_words = len(query_words.intersection(test_words))
+                        score = min(common_words * 20, 60)
                 
-                # Additional scoring based on organization type
-                org_type = item.get('types', [])
-                if any(t in ['Education', 'University', 'Institute'] for t in org_type):
-                    score += 100
+                # Boost score for exact institution type matches
+                org_types = item.get('types', [])
+                if any(t in ['Education', 'University', 'Institute', 'Faculty'] for t in org_types):
+                    score += 10
                 
                 if score > best_score:
                     best_score = score
                     best_match = item
-                    print(f"🎯 New best match: {name} (score: {score})")
+                    print(f"🏆 New best match: {name} (score: {score})")
         
-        print(f"🏆 Best match selected: {best_match.get('name') if best_match else 'None'} with score {best_score}")
-        
-        if best_match and best_score > 50:  # Minimum threshold
-            # Extract ROR ID and website
-            ror_id = best_match['id'].split('/')[-1]
+        # Apply minimum threshold
+        if best_match and best_score >= 40:  # Lowered threshold to catch more matches
+            # Extract ROR ID
+            ror_id = best_match.get('id', '').split('/')[-1]
+            if not ror_id:
+                print(f"❌ No ROR ID found for best match")
+                return None, None
+                
             colab_url = f"https://colab.ws/organizations/{ror_id}"
             
-            # Extract website
+            # Extract website with better error handling
             website = None
-            links = best_match.get('links', []) or []
+            links = best_match.get('links', [])
+            
+            # Handle both string and object formats
             for link in links:
                 if isinstance(link, dict):
-                    url = link.get('value') or link.get('url')
+                    url = link.get('value') or link.get('url') or link.get('link')
                 else:
                     url = str(link)
-                    
-                if url and isinstance(url, str):
+                
+                if url and isinstance(url, str) and url.strip():
                     url = url.strip()
-                    if url.startswith('http'):
+                    if url.startswith(('http://', 'https://')):
                         website = url
                         break
-                    elif '.' in url:  # Likely a website
-                        website = 'https://' + url
+                    elif '.' in url and len(url) > 4:  # Likely a website
+                        website = 'https://' + url.lstrip('/')
                         break
             
-            print(f"✅ Found: Colab-ROR: {colab_url}, Website: {website}")
+            print(f"✅ Found ROR: {colab_url}, Website: {website}")
             return colab_url, website
         else:
             print(f"❌ No good match found (best score: {best_score})")
             return None, None
         
     except Exception as e:
-        print(f"🚨 Error searching ROR for '{affiliation_name}': {str(e)}")
+        print(f"🚨 Critical error searching ROR for '{affiliation_name}': {str(e)}")
+        import traceback
+        print(f"Stack trace: {traceback.format_exc()}")
         return None, None
 
 def search_ror_organization_cached(affiliation_name, state):
@@ -5901,3 +5919,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
