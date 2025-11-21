@@ -3564,6 +3564,68 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
 
 # === NEW FUNCTIONS FOR COMBINED SHEETS ===
 
+def search_ror_organization(affiliation_name):
+    """Search for organization in ROR database and return best match"""
+    try:
+        # Search ROR API
+        url = "https://api.ror.org/organizations"
+        params = {'query': affiliation_name.strip()}
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        items = response.json().get('items', [])
+        if not items:
+            return None, None
+        
+        # Find best match using fuzzy matching
+        best_match = None
+        best_score = -1
+        
+        for item in items:
+            score = 0
+            name = item.get('name', '').lower()
+            texts = [name] + [a.lower() for a in item.get('aliases', [])] + [a.lower() for a in item.get('acronyms', []) if a]
+            
+            # Exact match or starts with query
+            if affiliation_name.strip().lower() in texts or affiliation_name.strip().lower() == name:
+                score = 10000
+            elif name.startswith(affiliation_name.strip().lower()):
+                score = 9000
+            else:
+                # Use token set ratio for fuzzy matching
+                from thefuzz import fuzz
+                score = fuzz.token_set_ratio(affiliation_name.strip().lower(), name)
+            
+            if score > best_score:
+                best_score = score
+                best_match = item
+        
+        if best_match:
+            # Extract ROR ID and website
+            ror_id = best_match['id'].split('/')[-1]
+            colab_url = f"https://colab.ws/organizations/{ror_id}"
+            
+            # Extract website
+            website = None
+            links = best_match.get('links', []) or []
+            for link in links:
+                url = (link.get('value') or link.get('url') if isinstance(link, dict) else str(link)) if link else None
+                if url and isinstance(url, str):
+                    url = url.strip()
+                    if url.startswith('http'):
+                        website = url
+                    else:
+                        website = 'https://' + url
+                    break
+            
+            return colab_url, website
+        
+        return None, None
+        
+    except Exception as e:
+        print(f"Error searching ROR for {affiliation_name}: {str(e)}")
+        return None, None
+
 def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles):
     """Создает объединенный лист авторов анализируемых и цитирующих статей"""
     
@@ -3671,8 +3733,13 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
         else:
             activity_balance = "Citing-Heavy"
         
+        # Search for ROR information
+        colab_ror, website = search_ror_organization(affiliation)
+        
         combined_data.append({
             'Affiliation': affiliation,
+            'Colab-ROR': colab_ror if colab_ror else '',
+            'Website': website if website else '',
             'Total': total_mentions,
             'Status': affiliation_status,
             'Analyzed_Count': analyzed_count,
@@ -5761,4 +5828,3 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
-
