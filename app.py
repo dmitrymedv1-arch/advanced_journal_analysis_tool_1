@@ -3866,33 +3866,73 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
     author_affiliations = defaultdict(set)
     author_counts = Counter()
     
-    # Обрабатываем анализируемые статьи
+    # Обрабатываем анализируемые статьи - используем авторов из Crossref для правильного формата
     for meta in analyzed_data:
         if not meta:
             continue
+        
+        # Берем авторов из Crossref (правильный формат "Фамилия Инициалы")
+        cr = meta.get('crossref')
+        authors_from_cr = []
+        if cr and cr.get('author'):
+            for auth in cr.get('author', []):
+                family_name = auth.get('family', '').strip()
+                given_name = auth.get('given', '').strip()
+                if family_name:
+                    # Форматируем как "Фамилия Инициалы"
+                    initials = '.'.join([c + '.' for c in given_name if c.isupper()]) if given_name else ''
+                    if initials:
+                        author_name = f"{family_name} {initials}".strip()
+                    else:
+                        author_name = family_name
+                    authors_from_cr.append(author_name)
+        
+        # Берем аффилиации из OpenAlex
         oa = meta.get('openalex')
+        affiliations_list = []
         if oa:
-            authors_list, affiliations_list, _ = extract_affiliations_and_countries(oa)
-            for author in authors_list:
-                normalized_author = normalize_author_name(author)
-                author_counts[normalized_author] += 1
-                for affiliation in affiliations_list:
-                    if affiliation and affiliation != "Unknown":
-                        author_affiliations[normalized_author].add(affiliation)
+            _, affiliations_list, _ = extract_affiliations_and_countries(oa)
+        
+        # Связываем авторов с аффилиациями
+        for author in authors_from_cr:
+            author_counts[author] += 1
+            for affiliation in affiliations_list:
+                if affiliation and affiliation != "Unknown":
+                    author_affiliations[author].add(affiliation)
     
-    # Обрабатываем цитирующие статьи
+    # Обрабатываем цитирующие статьи аналогично
     for meta in citing_data:
         if not meta:
             continue
+        
+        # Берем авторов из Crossref (правильный формат "Фамилия Инициалы")
+        cr = meta.get('crossref')
+        authors_from_cr = []
+        if cr and cr.get('author'):
+            for auth in cr.get('author', []):
+                family_name = auth.get('family', '').strip()
+                given_name = auth.get('given', '').strip()
+                if family_name:
+                    # Форматируем как "Фамилия Инициалы"
+                    initials = '.'.join([c + '.' for c in given_name if c.isupper()]) if given_name else ''
+                    if initials:
+                        author_name = f"{family_name} {initials}".strip()
+                    else:
+                        author_name = family_name
+                    authors_from_cr.append(author_name)
+        
+        # Берем аффилиации из OpenAlex
         oa = meta.get('openalex')
+        affiliations_list = []
         if oa:
-            authors_list, affiliations_list, _ = extract_affiliations_and_countries(oa)
-            for author in authors_list:
-                normalized_author = normalize_author_name(author)
-                author_counts[normalized_author] += 1
-                for affiliation in affiliations_list:
-                    if affiliation and affiliation != "Unknown":
-                        author_affiliations[normalized_author].add(affiliation)
+            _, affiliations_list, _ = extract_affiliations_and_countries(oa)
+        
+        # Связываем авторов с аффилиациями
+        for author in authors_from_cr:
+            author_counts[author] += 1
+            for affiliation in affiliations_list:
+                if affiliation and affiliation != "Unknown":
+                    author_affiliations[author].add(affiliation)
     
     # Создаем объединенные данные
     combined_data = []
@@ -3914,7 +3954,7 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         affiliations = author_affiliations.get(author, set())
         primary_affiliation = "Unknown"
         if affiliations:
-            # Выбираем первую аффилиацию (можно улучшить логику выбора основной аффилиации)
+            # Выбираем первую аффилиацию
             primary_affiliation = sorted(affiliations)[0]
         
         # Рассчитываем проценты
@@ -3929,7 +3969,7 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         else:
             author_status = "Citing Only"
         
-        # Рассчитываем Loyalty Score (процент публикаций от общей активности)
+        # Рассчитываем Loyalty Score
         loyalty_score_pct = (analyzed_count / total_publications * 100) if total_publications > 0 else 0
         
         # Определяем Activity Balance
@@ -5681,6 +5721,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
