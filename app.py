@@ -5619,6 +5619,16 @@ def main():
             help=glossary.get_tooltip('ISSN')
         )
         
+        # Period input - disabled when Special Analysis is active
+        period = st.text_input(
+            translation_manager.get_text('analysis_period'),
+            value="2022-2025",
+            help=translation_manager.get_text('period_examples'),
+            disabled=False  # Сначала всегда активен
+        )
+        
+        st.markdown("---")  # Разделитель между основными параметрами и опциями
+        
         # Special Analysis checkbox
         special_analysis = st.checkbox(
             "🎯 Special Analysis Mode", 
@@ -5637,19 +5647,15 @@ def main():
         include_author_id_data = st.checkbox(
             "👤 Include Author ID data", 
             value=False,
-            help="Include Author ID data (ORCID, Scopus ID, WoS ID) in Author_ID_data sheet (may significantly increase processing time; please do not use for a large number of papers/citations)"
+            help="Include Author ID data (ORCID, Scopus ID, WoS ID) in Author_ID_data sheet (may significantly increase processing time)"
         )
         
-        # Period input - disabled when Special Analysis is active
-        period = st.text_input(
-            translation_manager.get_text('analysis_period'),
-            value="2022-2025",
-            help=translation_manager.get_text('period_examples'),
-            disabled=special_analysis
-        )
-        
+        # Обновляем состояние disabled для Period input после создания special_analysis
         if special_analysis:
             st.info("🔬 Special Analysis Mode: Using fixed period for CiteScore & Impact Factor calculation")
+            # Динамически обновляем состояние поля Period
+            # В Streamlit мы не можем напрямую обновить существующий виджет, 
+            # но показываем сообщение что период игнорируется
         
         if include_ror_data:
             st.info("🔍 ROR Data: Organization information will be included in Combined_Affiliations sheet")
@@ -5763,6 +5769,10 @@ def main():
     
     with col1:
         st.subheader("🚀 " + translation_manager.get_text('start_analysis'))
+        
+        # Показываем предупреждение если Special Analysis активен но указан период
+        if special_analysis and period:
+            st.warning("⚠️ Special Analysis Mode is active - the specified period will be ignored and fixed calculation windows will be used instead.")
         
         if st.button(translation_manager.get_text('start_analysis'), type="primary", use_container_width=True):
             if not issn:
@@ -6020,6 +6030,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
