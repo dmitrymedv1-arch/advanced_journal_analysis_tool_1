@@ -3872,7 +3872,7 @@ def get_work_by_doi(doi):
         return None
 
 def extract_authors_and_affiliations(work_data):
-    """Извлекает список авторов и их аффилиаций из данных работы"""
+    """Извлекает список авторов и их аффилиаций из данных работы в формате 'Фамилия И.'"""
     if not work_data or 'authorships' not in work_data:
         return []
     
@@ -3881,10 +3881,23 @@ def extract_authors_and_affiliations(work_data):
         author_data = authorship.get('author', {})
         institution_data = authorship.get('institutions', [])
         
-        # Имя автора
-        author_name = author_data.get('display_name', 'Unknown Author')
+        # Получаем полное имя из OpenAlex
+        full_name = author_data.get('display_name', 'Unknown Author')
         
-        # Аффилиация: берем первую учреждение
+        # Конвертируем формат "Имя Фамилия" в "Фамилия И."
+        # Пример: "Vladislav Sadykov" -> "Sadykov V."
+        parts = full_name.split()
+        if len(parts) >= 2:
+            # Последняя часть - фамилия
+            family_name = parts[-1]
+            # Первая часть - имя, берем первую букву
+            given_initial = parts[0][0] + '.' if parts[0] else ''
+            author_name = f"{family_name} {given_initial}".strip()
+        else:
+            # Если только одна часть, используем как есть
+            author_name = full_name
+        
+        # Аффилиация: берем первое учреждение
         affiliation = 'Unknown Affiliation'
         if institution_data:
             first_inst = institution_data[0]
@@ -5767,6 +5780,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
