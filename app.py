@@ -1,4 +1,4 @@
-import streamlit as stimport streamlit as st
+import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
@@ -5650,3 +5650,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
