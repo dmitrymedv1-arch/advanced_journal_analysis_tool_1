@@ -3859,25 +3859,15 @@ def search_author_identifiers_cached(author_name, affiliation, cache_dict):
     
     return orcid_url, scopus_url, wos_url
     
-def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles, analyzed_metadata, citing_metadata):
+def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles, analyzed_data, citing_data):
     """Создает объединенный лист авторов анализируемых и цитирующих статей с правильными аффилиациями"""
     
-    # Нормализуем имена авторов и объединяем счетчики
-    def normalize_and_aggregate(authors_list):
-        normalized_counts = Counter()
-        for author, count in authors_list:
-            normalized_name = normalize_author_name(author)
-            normalized_counts[normalized_name] += count
-        return normalized_counts
-    
-    analyzed_authors = normalize_and_aggregate(analyzed_authors_data)
-    citing_authors = normalize_and_aggregate(citing_authors_data)
-    
-    # Создаем словарь для хранения аффилиаций авторов
+    # Создаем словарь для хранения авторов и их аффилиаций
     author_affiliations = defaultdict(set)
+    author_counts = Counter()
     
-    # Извлекаем аффилиации из анализируемых статей
-    for meta in analyzed_metadata:
+    # Обрабатываем анализируемые статьи
+    for meta in analyzed_data:
         if not meta:
             continue
         oa = meta.get('openalex')
@@ -3885,12 +3875,13 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
             authors_list, affiliations_list, _ = extract_affiliations_and_countries(oa)
             for author in authors_list:
                 normalized_author = normalize_author_name(author)
+                author_counts[normalized_author] += 1
                 for affiliation in affiliations_list:
-                    if affiliation:  # Добавляем только непустые аффилиации
+                    if affiliation and affiliation != "Unknown":
                         author_affiliations[normalized_author].add(affiliation)
     
-    # Извлекаем аффилиации из цитирующих статей
-    for meta in citing_metadata:
+    # Обрабатываем цитирующие статьи
+    for meta in citing_data:
         if not meta:
             continue
         oa = meta.get('openalex')
@@ -3898,25 +3889,33 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
             authors_list, affiliations_list, _ = extract_affiliations_and_countries(oa)
             for author in authors_list:
                 normalized_author = normalize_author_name(author)
+                author_counts[normalized_author] += 1
                 for affiliation in affiliations_list:
-                    if affiliation:  # Добавляем только непустые аффилиации
+                    if affiliation and affiliation != "Unknown":
                         author_affiliations[normalized_author].add(affiliation)
     
+    # Создаем объединенные данные
     combined_data = []
-    all_authors = set(analyzed_authors.keys()) | set(citing_authors.keys())
+    all_authors = set(author_counts.keys())
     
     # Кэш для поиска идентификаторов авторов
     author_identifiers_cache = {}
     
+    # Получаем счетчики из исходных данных для анализируемых и цитирующих авторов
+    analyzed_authors_dict = dict(analyzed_authors_data)
+    citing_authors_dict = dict(citing_authors_data)
+    
     for author in all_authors:
-        analyzed_count = analyzed_authors.get(author, 0)
-        citing_count = citing_authors.get(author, 0)
-        total_publications = analyzed_count + citing_count
+        analyzed_count = analyzed_authors_dict.get(author, 0)
+        citing_count = citing_authors_dict.get(author, 0)
+        total_publications = author_counts[author]
         
         # Получаем аффилиации автора
         affiliations = author_affiliations.get(author, set())
-        primary_affiliation = next(iter(affiliations), "Unknown") if affiliations else "Unknown"
-        all_affiliations_str = "; ".join(sorted(affiliations)) if affiliations else "Unknown"
+        primary_affiliation = "Unknown"
+        if affiliations:
+            # Выбираем первую аффилиацию (можно улучшить логику выбора основной аффилиации)
+            primary_affiliation = sorted(affiliations)[0]
         
         # Рассчитываем проценты
         analyzed_pct = (analyzed_count / analyzed_total_articles * 100) if analyzed_total_articles > 0 else 0
@@ -3945,13 +3944,12 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         else:
             activity_balance = "Citing-Heavy"
         
-        # Ищем идентификаторы автора (используем основную аффилиацию для поиска)
+        # Ищем идентификаторы автора
         orcid_url, scopus_url, wos_url = search_author_identifiers_cached(author, primary_affiliation, author_identifiers_cache)
         
         combined_data.append({
             'Author': author,
             'Affiliation': primary_affiliation,
-            'All_Affiliations': all_affiliations_str,
             'Total': total_publications,
             'Status': author_status,
             'Analyzed_Count': analyzed_count,
@@ -5683,6 +5681,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
