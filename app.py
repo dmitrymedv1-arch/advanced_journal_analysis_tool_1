@@ -3885,17 +3885,7 @@ def extract_authors_and_affiliations(work_data):
         full_name = author_data.get('display_name', 'Unknown Author')
         
         # Конвертируем формат "Имя Фамилия" в "Фамилия И."
-        # Пример: "Vladislav Sadykov" -> "Sadykov V."
-        parts = full_name.split()
-        if len(parts) >= 2:
-            # Последняя часть - фамилия
-            family_name = parts[-1]
-            # Первая часть - имя, берем первую букву
-            given_initial = parts[0][0] + '.' if parts[0] else ''
-            author_name = f"{family_name} {given_initial}".strip()
-        else:
-            # Если только одна часть, используем как есть
-            author_name = full_name
+        author_name = convert_name_to_surname_initials(full_name)
         
         # Аффилиация: берем первое учреждение
         affiliation = 'Unknown Affiliation'
@@ -3909,6 +3899,36 @@ def extract_authors_and_affiliations(work_data):
         })
     
     return authors_info
+
+def convert_name_to_surname_initials(full_name):
+    """Конвертирует имя из формата 'Имя Фамилия' в 'Фамилия И.'"""
+    if not full_name or full_name == 'Unknown Author':
+        return full_name
+    
+    parts = full_name.split()
+    
+    # Убираем лишние пробелы
+    parts = [p.strip() for p in parts if p.strip()]
+    
+    if len(parts) == 0:
+        return full_name
+    elif len(parts) == 1:
+        # Только фамилия
+        return parts[0]
+    else:
+        # Последняя часть - фамилия
+        family_name = parts[-1]
+        
+        # Все остальные части - имена, берем первые буквы
+        initials = []
+        for part in parts[:-1]:
+            if part and part[0].isupper():
+                initials.append(part[0] + '.')
+        
+        if initials:
+            return f"{family_name} {' '.join(initials)}".strip()
+        else:
+            return family_name
 
 def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles, analyzed_data, citing_data):
     """Создает объединенный лист авторов анализируемых и цитирующих статей с правильными аффилиациями"""
@@ -5780,6 +5800,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
