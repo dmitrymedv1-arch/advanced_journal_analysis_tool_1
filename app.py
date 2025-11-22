@@ -5623,7 +5623,7 @@ def main():
         special_analysis = st.checkbox(
             "🎯 Special Analysis Mode", 
             value=False,
-            help="Calculate CiteScore and Impact Factor metrics using fixed time windows (current date -1580 days to current date -120 days)"
+            help="Calculate CiteScore and Impact Factor metrics using their specific time windows (with lags until they are officially announced)"
         )
         
         # Period input - disabled when Special Analysis is active
@@ -6025,6 +6025,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
