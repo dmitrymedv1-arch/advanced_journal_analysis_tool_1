@@ -789,6 +789,8 @@ class AnalysisState:
         self.if_data = None
         self.cs_data = None
         self.is_special_analysis = False
+        self.include_ror_data = False  # NEW: Flag for ROR data inclusion
+        self.ror_cache = {}  # NEW: In-memory cache for ROR data
         
         # Initialize components
         self.config = AnalysisConfig()
@@ -3687,6 +3689,54 @@ def search_ror_organization_cached(affiliation_name, cache_dict):
     cache_dict[cache_key] = (colab_ror, website)
     
     return colab_ror, website
+
+# === NEW FUNCTION: PARALLEL ROR PROCESSING WITH PROGRESS BAR ===
+def process_ror_data_parallel(affiliations_list, state):
+    """Process ROR data for affiliations in parallel with progress bar"""
+    if not state.include_ror_data:
+        return {}
+    
+    print(f"🔍 Starting parallel ROR processing for {len(affiliations_list)} affiliations")
+    
+    # Progress bar setup
+    ror_progress = st.progress(0)
+    ror_status = st.empty()
+    
+    ror_results = {}
+    processed_count = 0
+    total_affiliations = len(affiliations_list)
+    
+    # Prepare arguments for parallel processing
+    args_list = [(affiliation, state.ror_cache) for affiliation in affiliations_list]
+    
+    # Use 4 workers for ROR API to avoid overloading
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(search_ror_organization_cached, args[0], args[1]): args for args in args_list}
+        
+        for i, future in enumerate(as_completed(futures)):
+            args = futures[future]
+            affiliation_name = args[0]
+            
+            try:
+                colab_ror, website = future.result()
+                ror_results[affiliation_name] = (colab_ror, website)
+                processed_count += 1
+                
+                # Update progress
+                progress = (i + 1) / total_affiliations
+                ror_progress.progress(progress)
+                ror_status.text(f"🔍 Processing ROR data: {i + 1}/{total_affiliations}")
+                
+            except Exception as e:
+                print(f"⚠️ Error processing ROR for '{affiliation_name}': {str(e)}")
+                ror_results[affiliation_name] = (None, None)
+                processed_count += 1
+    
+    ror_progress.empty()
+    ror_status.empty()
+    
+    print(f"✅ ROR processing completed: {processed_count}/{total_affiliations} affiliations processed")
+    return ror_results
     
 def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles):
     """Создает объединенный лист авторов анализируемых и цитирующих статей"""
@@ -3754,7 +3804,7 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
     
     return combined_data
 
-def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affiliations_data, analyzed_total_mentions, citing_total_mentions):
+def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affiliations_data, analyzed_total_mentions, citing_total_mentions, state):
     """Создает объединенный лист аффилиаций анализируемых и цитирующих статей"""
     
     analyzed_affiliations = Counter(dict(analyzed_affiliations_data))
@@ -3762,6 +3812,12 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
     
     combined_data = []
     all_affiliations = set(analyzed_affiliations.keys()) | set(citing_affiliations.keys())
+    
+    # NEW: Process ROR data in parallel if enabled
+    ror_results = {}
+    if state.include_ror_data:
+        affiliations_list = list(all_affiliations)
+        ror_results = process_ror_data_parallel(affiliations_list, state)
     
     for affiliation in all_affiliations:
         analyzed_count = analyzed_affiliations.get(affiliation, 0)
@@ -3795,8 +3851,15 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
         else:
             activity_balance = "Citing-Heavy"
         
-        # Search for ROR information
-        colab_ror, website = search_ror_organization(affiliation)
+        # NEW: Get ROR information from cache or API results
+        colab_ror = ""
+        website = ""
+        if state.include_ror_data:
+            if affiliation in ror_results:
+                colab_ror, website = ror_results[affiliation]
+            else:
+                # Fallback to direct search if not in results
+                colab_ror, website = search_ror_organization_cached(affiliation, state.ror_cache)
         
         combined_data.append({
             'Affiliation': affiliation,
@@ -4205,7 +4268,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 analyzed_stats['all_affiliations'],
                 citing_stats['all_affiliations'],
                 sum(count for _, count in analyzed_stats['all_affiliations']),
-                sum(count for _, count in citing_stats['all_affiliations'])
+                sum(count for _, count in citing_stats['all_affiliations']),
+                state  # NEW: Pass state to access ROR settings
             )
             if combined_affiliations_data:
                 combined_affiliations_df = pd.DataFrame(combined_affiliations_data)
@@ -4803,7 +4867,7 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
                         st.error("❌ " + translation_manager.get_text('high_self_citations_problems'))
 
 # === 19. Main Analysis Function ===
-def analyze_journal(issn, period_str, special_analysis=False):
+def analyze_journal(issn, period_str, special_analysis=False, include_ror_data=False):
     global delayer
     delayer = AdaptiveDelayer()
     
@@ -4812,6 +4876,9 @@ def analyze_journal(issn, period_str, special_analysis=False):
     
     # Set Special Analysis mode based on checkbox
     state.is_special_analysis = special_analysis
+    
+    # NEW: Set ROR data inclusion based on checkbox
+    state.include_ror_data = include_ror_data
     
     # Load metrics data at the start
     load_metrics_data()
@@ -5119,6 +5186,13 @@ def main():
             help="Calculate CiteScore and Impact Factor metrics using fixed time windows (current date -1580 days to current date -120 days)"
         )
         
+        # NEW: Include ROR data checkbox
+        include_ror_data = st.checkbox(
+            "🔍 Include ROR data", 
+            value=False,
+            help="Include ROR organization data in Combined_Affiliations sheet (may increase processing time)"
+        )
+        
         # Period input - disabled when Special Analysis is active
         period = st.text_input(
             translation_manager.get_text('analysis_period'),
@@ -5129,6 +5203,9 @@ def main():
         
         if special_analysis:
             st.info("🔬 Special Analysis Mode: Using fixed period for CiteScore & Impact Factor calculation")
+        
+        if include_ror_data:
+            st.info("🔍 ROR Data: Organization information will be included in Combined_Affiliations sheet")
         
         st.markdown("---")
         st.header("📚 " + translation_manager.get_text('dictionary_of_terms'))
@@ -5218,14 +5295,16 @@ def main():
                 "- " + translation_manager.get_text('capability_6') + "\n" +
                 "- " + translation_manager.get_text('capability_7') + "\n" +
                 "- " + translation_manager.get_text('capability_8') + "\n" +
-                "- **NEW:** Special Analysis metrics (CiteScore & Impact Factor)")
+                "- **NEW:** Special Analysis metrics (CiteScore & Impact Factor)\n" +
+                "- **NEW:** ROR organization data integration")
         
         st.warning("**" + translation_manager.get_text('note') + ":** \n" +
                   "- " + translation_manager.get_text('note_text_1') + "\n" +
                   "- " + translation_manager.get_text('note_text_2') + "\n" +
                   "- " + translation_manager.get_text('note_text_3') + "\n" +
                   "- " + translation_manager.get_text('note_text_4') + "\n" +
-                  "- " + translation_manager.get_text('note_text_5'))
+                  "- " + translation_manager.get_text('note_text_5') + "\n" +
+                  "- **NEW:** ROR data processing may increase analysis time for large datasets")
     
     # Main area
     col1, col2 = st.columns([2, 1])
@@ -5243,7 +5322,7 @@ def main():
                 return
                 
             with st.spinner(translation_manager.get_text('analysis_starting')):
-                analyze_journal(issn, period, special_analysis)
+                analyze_journal(issn, period, special_analysis, include_ror_data)
     
     with col2:
         st.subheader("📤 " + translation_manager.get_text('results'))
