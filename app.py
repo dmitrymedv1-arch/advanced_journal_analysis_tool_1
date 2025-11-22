@@ -4153,7 +4153,7 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
     return combined_data
 
 def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affiliations_data, analyzed_total_mentions, citing_total_mentions):
-    """Создает объединенный лист аффилиаций анализируемых и цитирующих статей"""
+    """Создает объединенный лист аффилиаций с улучшенным ROR поиском"""
     
     analyzed_affiliations = Counter(dict(analyzed_affiliations_data))
     citing_affiliations = Counter(dict(citing_affiliations_data))
@@ -4161,7 +4161,10 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
     combined_data = []
     all_affiliations = set(analyzed_affiliations.keys()) | set(citing_affiliations.keys())
     
-    for affiliation in all_affiliations:
+    # Кэш для избежания дублирующих запросов
+    ror_cache = {}
+    
+    for i, affiliation in enumerate(all_affiliations):
         analyzed_count = analyzed_affiliations.get(affiliation, 0)
         citing_count = citing_affiliations.get(affiliation, 0)
         total_mentions = analyzed_count + citing_count
@@ -4178,7 +4181,7 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
         else:
             affiliation_status = "Citing Only"
         
-        # Рассчитываем Engagement Score (процент публикаций от общей активности)
+        # Рассчитываем Engagement Score
         engagement_score_pct = (analyzed_count / total_mentions * 100) if total_mentions > 0 else 0
         
         # Определяем Activity Balance
@@ -4193,8 +4196,13 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
         else:
             activity_balance = "Citing-Heavy"
         
-        # Search for ROR information
-        colab_ror, website = search_ror_organization(affiliation)
+        # Search for ROR information с кэшированием
+        cache_key = affiliation.strip().lower()
+        if cache_key not in ror_cache:
+            colab_ror, website = search_ror_organization_improved(affiliation)
+            ror_cache[cache_key] = (colab_ror, website)
+        else:
+            colab_ror, website = ror_cache[cache_key]
         
         combined_data.append({
             'Affiliation': affiliation,
@@ -4209,6 +4217,10 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
             'Analyzed_Pct': round(analyzed_pct, 2),
             'Citing_Pct': round(citing_pct, 2)
         })
+        
+        # Прогресс для длинных списков
+        if i % 10 == 0:
+            print(f"📊 Processed {i+1}/{len(all_affiliations)} affiliations")
     
     # Сортируем по общему количеству упоминаний (убывание)
     combined_data.sort(key=lambda x: x['Total'], reverse=True)
@@ -6289,4 +6301,5 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
