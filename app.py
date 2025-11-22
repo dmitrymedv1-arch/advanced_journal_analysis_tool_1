@@ -3881,11 +3881,11 @@ def extract_authors_and_affiliations(work_data):
         author_data = authorship.get('author', {})
         institution_data = authorship.get('institutions', [])
         
-        # Получаем полное имя из OpenAlex
-        full_name = author_data.get('display_name', 'Unknown Author')
+        # Получаем английское имя из доступных вариантов
+        full_name = get_english_author_name(author_data)
         
-        # Конвертируем формат "Имя Фамилия" в "Фамилия И." с английскими именами
-        author_name = convert_name_to_english_surname_initials(full_name)
+        # Конвертируем формат "Имя Фамилия" в "Фамилия И."
+        author_name = convert_name_to_surname_initials(full_name)
         
         # Аффилиация: берем первое учреждение
         affiliation = 'Unknown Affiliation'
@@ -3900,13 +3900,36 @@ def extract_authors_and_affiliations(work_data):
     
     return authors_info
 
-def convert_name_to_english_surname_initials(full_name):
-    """Конвертирует имя в формат 'Фамилия И.' с английскими именами"""
-    if not full_name or full_name == 'Unknown Author':
-        return full_name
+def get_english_author_name(author_data):
+    """Выбирает английское имя автора из доступных вариантов"""
+    if not author_data:
+        return 'Unknown Author'
     
-    # Если имя уже в английском формате "Фамилия И.", оставляем как есть
-    if is_english_surname_format(full_name):
+    main_name = author_data.get('display_name', 'Unknown Author')
+    alternative_names = author_data.get('display_name_alternatives', [])
+    
+    # Собираем все доступные имена
+    all_names = [main_name] + alternative_names
+    
+    # Ищем английские имена
+    english_names = [name for name in all_names if is_english_name(name)]
+    
+    # Если есть английские имена, берем первое
+    if english_names:
+        return english_names[0]
+    
+    # Если нет английских имен, используем основное имя
+    return main_name
+
+def is_english_name(name):
+    """Проверяет, содержит ли имя только латинские буквы"""
+    if not name:
+        return False
+    return all(c.isascii() and (c.isalpha() or c.isspace() or c in ".-'") for c in name if not c.isspace())
+
+def convert_name_to_surname_initials(full_name):
+    """Конвертирует имя из формата 'Имя Фамилия' в 'Фамилия И.'"""
+    if not full_name or full_name == 'Unknown Author':
         return full_name
     
     parts = full_name.split()
@@ -3930,33 +3953,6 @@ def convert_name_to_english_surname_initials(full_name):
             return f"{family_name} {' '.join(initials)}".strip()
         else:
             return family_name
-
-def is_english_surname_format(name):
-    """Проверяет, находится ли имя уже в формате 'Фамилия И.' на английском"""
-    if not name:
-        return False
-    
-    # Проверяем, что имя содержит только латинские буквы
-    if not all(c.isascii() and (c.isalpha() or c.isspace() or c in ".-'") for c in name if not c.isspace()):
-        return False
-    
-    parts = name.split()
-    if len(parts) < 2:
-        return False
-    
-    # Проверяем, что последняя часть (фамилия) не заканчивается на точку
-    # и первая часть (скорее всего инициал) заканчивается на точку
-    if parts[0].endswith('.') and not parts[-1].endswith('.'):
-        return True
-    
-    # Или проверяем типичные английские фамилии
-    english_surname_indicators = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 
-                                 'Miller', 'Davis', 'Wilson', 'Anderson', 'Taylor']
-    
-    if any(indicator in name for indicator in english_surname_indicators):
-        return True
-    
-    return False
 
 def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles, analyzed_data, citing_data):
     """Создает объединенный лист авторов анализируемых и цитирующих статей с правильными аффилиациями"""
@@ -5828,6 +5824,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
