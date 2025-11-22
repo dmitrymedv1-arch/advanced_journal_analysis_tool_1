@@ -29,7 +29,6 @@ import asyncio
 from contextlib import asynccontextmanager
 import diskcache
 from functools import wraps
-from thefuzz import fuzz
 
 # Import translation manager
 from languages import translation_manager
@@ -47,20 +46,14 @@ class AppSettings(BaseModel):
     api_timeouts: Dict[str, int] = {
         'crossref': 15,
         'openalex': 10,
-        'batch': 30,
-        'ror': 10,
-        'orcid': 10
+        'batch': 30
     }
     batch_sizes: Dict[str, int] = {
         'metadata': 10,
-        'citations': 5,
-        'ror_lookup': 5,
-        'orcid_lookup': 3
+        'citations': 5
     }
     cache_ttl: int = 3600  # 1 hour
     max_cache_size: int = 1000
-    ror_cache_ttl: int = 86400  # 24 hours for ROR data
-    orcid_cache_ttl: int = 86400  # 24 hours for ORCID data
     
     @validator('email')
     def validate_email(cls, v):
@@ -492,315 +485,6 @@ class OpenAlexClient(APIClientBase):
         return None
 
 # =============================================================================
-# ROR AND ORCID API CLIENTS
-# =============================================================================
-
-class RORClient(APIClientBase):
-    """Client for ROR API"""
-    
-    def __init__(self, config: AnalysisConfig, logger: AnalysisLogger, cache: CacheManager):
-        super().__init__(config, logger, cache)
-        self.base_url = "https://api.ror.org/organizations"
-    
-    def search_organization(self, query: str) -> List[Dict]:
-        """Search organization in ROR database"""
-        cache_key = f"ror_search_{query.lower().strip()}"
-        cached_data = self.cache.get(cache_key)
-        if cached_data:
-            return cached_data
-        
-        try:
-            params = {'query': query.strip()}
-            data = self._make_request(self.base_url, params=params, timeout=self.settings.api_timeouts['ror'])
-            
-            if data and 'items' in data:
-                self.cache.set(cache_key, data['items'], ttl=self.settings.ror_cache_ttl)
-                return data['items']
-        except Exception as e:
-            self.logger.warning(f"ROR search failed for {query}: {str(e)}")
-        
-        return []
-    
-    def get_best_match(self, query: str, items: List[Dict]) -> Optional[Dict]:
-        """Get best match for organization query"""
-        if not items:
-            return None
-        
-        q = query.strip().lower()
-        best, best_score = None, -1
-        
-        for item in items:
-            score = 0
-            name = item.get('name', '').lower()
-            texts = [name] + [a.lower() for a in item.get('aliases', [])] + [a.lower() for a in item.get('acronyms', []) if a]
-            
-            if q in texts or q == name:
-                score = 10000
-            elif name.startswith(q):
-                score = 9000
-            else:
-                score = fuzz.token_set_ratio(q, name)
-            
-            if score > best_score:
-                best_score, best = score, item
-        
-        return best
-    
-    def extract_website(self, item: Dict) -> Optional[str]:
-        """Extract website from ROR organization data"""
-        links = item.get('links', []) or []
-        for link in links:
-            url = (link.get('value') or link.get('url') if isinstance(link, dict) else str(link)) if link else None
-            if url and isinstance(url, str):
-                url = url.strip()
-                return url if url.startswith('http') else 'https://' + url
-        return None
-    
-    def get_organization_info(self, affiliation: str) -> Dict[str, Any]:
-        """Get complete organization information from ROR"""
-        if not affiliation:
-            return {}
-        
-        # Search for organization
-        items = self.search_organization(affiliation)
-        if not items:
-            return {}
-        
-        # Get best match
-        best_match = self.get_best_match(affiliation, items)
-        if not best_match:
-            return {}
-        
-        # Extract information
-        ror_id = best_match['id'].split('/')[-1]
-        colab_url = f"https://colab.ws/organizations/{ror_id}"
-        website = self.extract_website(best_match)
-        
-        return {
-            'ror_id': ror_id,
-            'name': best_match.get('name', ''),
-            'colab_url': colab_url,
-            'website': website,
-            'country': best_match.get('country', {}).get('country_name', ''),
-            'types': best_match.get('types', [])
-        }
-
-class ORCIDClient(APIClientBase):
-    """Client for ORCID API"""
-    
-    def __init__(self, config: AnalysisConfig, logger: AnalysisLogger, cache: CacheManager):
-        super().__init__(config, logger, cache)
-        self.base_url = "https://pub.orcid.org/v3.0"
-    
-    def search_author(self, family_name: str, given_name_initials: str = "", affiliation: str = "") -> List[Dict]:
-        """Search author in ORCID database"""
-        cache_key = f"orcid_search_{family_name}_{given_name_initials}_{affiliation}".lower()
-        cached_data = self.cache.get(cache_key)
-        if cached_data:
-            return cached_data
-        
-        if not family_name:
-            return []
-        
-        # Build search query
-        query_parts = [f"family-name:{family_name}"]
-        
-        if given_name_initials:
-            query_parts.append(f"given-names:{given_name_initials}*")
-        
-        if affiliation:
-            query_parts.append(f"affiliation-org-name:{affiliation}")
-        
-        params = {
-            "q": " AND ".join(query_parts),
-            "rows": 10
-        }
-        
-        headers = {
-            "Accept": "application/json"
-        }
-        
-        try:
-            search_url = f"{self.base_url}/search/"
-            response = requests.get(search_url, params=params, headers=headers, timeout=self.settings.api_timeouts['orcid'])
-            
-            if response.status_code == 200:
-                data = response.json()
-                results = data.get('result', [])
-                self.cache.set(cache_key, results, ttl=self.settings.orcid_cache_ttl)
-                return results
-        except Exception as e:
-            self.logger.warning(f"ORCID search failed for {family_name}: {str(e)}")
-        
-        return []
-    
-    def get_complete_profile(self, orcid_id: str) -> Dict[str, Any]:
-        """Get complete ORCID profile"""
-        cache_key = f"orcid_profile_{orcid_id}"
-        cached_data = self.cache.get(cache_key)
-        if cached_data:
-            return cached_data
-        
-        profile_data = {}
-        headers = {"Accept": "application/json"}
-        
-        try:
-            # Get personal information
-            person_url = f"{self.base_url}/{orcid_id}/person"
-            response = requests.get(person_url, headers=headers, timeout=self.settings.api_timeouts['orcid'])
-            if response.status_code == 200:
-                profile_data['personal_info'] = self._extract_personal_info(response.json())
-            
-            # Get other identifiers
-            profile_data['other_identifiers'] = self._extract_other_identifiers(orcid_id)
-            
-            # Cache the complete profile
-            self.cache.set(cache_key, profile_data, ttl=self.settings.orcid_cache_ttl)
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to get ORCID profile for {orcid_id}: {str(e)}")
-        
-        return profile_data
-    
-    def _extract_personal_info(self, person_data: Dict) -> Dict[str, Any]:
-        """Extract personal information from ORCID data"""
-        info = {}
-        
-        try:
-            name = person_data.get('name', {})
-            info['given_name'] = name.get('given-names', {}).get('value', '')
-            info['family_name'] = name.get('family-name', {}).get('value', '')
-            info['full_name'] = f"{info['given_name']} {info['family_name']}".strip()
-            
-            # Biography
-            info['biography'] = person_data.get('biography', {}).get('content', '')
-            
-            # Country
-            addresses = person_data.get('addresses', {}).get('address', [])
-            if addresses:
-                info['country'] = addresses[0].get('country', {}).get('value', '')
-            else:
-                info['country'] = ''
-            
-            # Email
-            emails = []
-            email_list = person_data.get('emails', {}).get('email', [])
-            for email in email_list:
-                email_addr = email.get('email', '')
-                if email_addr:
-                    emails.append(email_addr)
-            info['emails'] = emails
-            
-        except Exception as e:
-            self.logger.warning(f"Error extracting personal info: {str(e)}")
-            info['full_name'] = 'Unknown'
-        
-        return info
-    
-    def _extract_other_identifiers(self, orcid_id: str) -> List[Dict]:
-        """Extract other identifiers from ORCID profile"""
-        other_ids = []
-        headers = {"Accept": "application/json"}
-        
-        try:
-            # Get external identifiers
-            external_ids_url = f"{self.base_url}/{orcid_id}/external-identifiers"
-            response = requests.get(external_ids_url, headers=headers, timeout=self.settings.api_timeouts['orcid'])
-            
-            if response.status_code == 200:
-                data = response.json()
-                external_ids = data.get('external-identifier', [])
-                
-                for ext_id in external_ids:
-                    id_type = ext_id.get('external-id-type', '')
-                    id_value = ext_id.get('external-id-value', '')
-                    
-                    # Format URL based on identifier type
-                    url = self._format_identifier_url(id_type, id_value, ext_id.get('external-id-url', {}).get('value', ''))
-                    
-                    other_ids.append({
-                        'type': id_type,
-                        'value': id_value,
-                        'url': url,
-                        'relationship': ext_id.get('external-id-relationship', '')
-                    })
-        
-        except Exception as e:
-            self.logger.warning(f"Error extracting other identifiers for {orcid_id}: {str(e)}")
-        
-        return other_ids
-    
-    def _format_identifier_url(self, id_type: str, id_value: str, original_url: str) -> str:
-        """Format identifier URL in modern format"""
-        if not id_value:
-            return original_url
-        
-        id_type_upper = id_type.upper()
-        
-        # Scopus Author ID - new format
-        if id_type_upper in ['SCOPUS', 'SCOPUS AUTHOR ID']:
-            return f"https://www.scopus.com/authid/detail.uri?authorId={id_value}"
-        
-        # ORCID
-        elif id_type_upper == 'ORCID':
-            return f"https://orcid.org/{id_value}"
-        
-        # DOI
-        elif id_type_upper == 'DOI':
-            if id_value.startswith('http'):
-                return id_value
-            return f"https://doi.org/{id_value}"
-        
-        # arXiv
-        elif id_type_upper == 'ARXIV':
-            if id_value.startswith('http'):
-                return id_value
-            return f"https://arxiv.org/abs/{id_value}"
-        
-        # PubMed
-        elif id_type_upper in ['PMID', 'PUBMED']:
-            if id_value.startswith('http'):
-                return id_value
-            return f"https://pubmed.ncbi.nlm.nih.gov/{id_value}"
-        
-        # ISNI
-        elif id_type_upper == 'ISNI':
-            return f"https://isni.org/isni/{id_value}"
-        
-        # ResearcherID (Web of Science)
-        elif id_type_upper == 'RESEARCHERID':
-            return f"http://www.researcherid.com/rid/{id_value}"
-        
-        # If original URL exists, use it
-        if original_url:
-            return original_url
-        
-        return ""
-    
-    def check_name_match(self, full_name: str, given_name_initials: str, family_name: str) -> bool:
-        """Check if full name matches initials and family name"""
-        if not given_name_initials:
-            return True
-        
-        try:
-            cleaned_initials = re.sub(r'[.\s]', '', given_name_initials).upper()
-            name_parts = full_name.upper().split()
-            family_name_upper = family_name.upper()
-            
-            if family_name_upper not in name_parts:
-                return False
-            
-            for part in name_parts:
-                if part != family_name_upper and part:
-                    for i, initial in enumerate(cleaned_initials):
-                        if i < len(part) and part[0] == initial:
-                            return True
-        except:
-            pass
-        
-        return False
-
-# =============================================================================
 # DATA PROCESSORS
 # =============================================================================
 
@@ -1112,10 +796,344 @@ class AnalysisState:
         self.cache_manager = CacheManager()
         self.crossref_client = CrossrefClient(self.config, self.logger, self.cache_manager)
         self.openalex_client = OpenAlexClient(self.config, self.logger, self.cache_manager)
-        self.ror_client = RORClient(self.config, self.logger, self.cache_manager)
-        self.orcid_client = ORCIDClient(self.config, self.logger, self.cache_manager)
         self.data_processor = DataProcessor(self.logger)
         self.metrics_calculator = MetricsCalculator(self.logger)
+
+# =============================================================================
+# OPTIMIZED ROR SERVICE
+# =============================================================================
+
+class RORService:
+    """Optimized service for ROR API with parallel requests and smart matching"""
+    
+    def __init__(self, max_workers=8, requests_per_second=5):
+        self.max_workers = max_workers
+        self.requests_per_second = requests_per_second
+        self.session = None
+        self.last_request_time = 0
+        self.lock = threading.Lock()
+        self.request_count = 0
+    
+    def get_session(self):
+        """Get or create requests session with connection pooling"""
+        if self.session is None:
+            self.session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=20, 
+                pool_maxsize=30,
+                max_retries=3,
+                pool_block=False
+            )
+            self.session.mount('http://', adapter)
+            self.session.mount('https://', adapter)
+            # Set default headers
+            self.session.headers.update({
+                'User-Agent': 'JournalAnalysisTool/1.0',
+                'Accept': 'application/json'
+            })
+        return self.session
+    
+    def _rate_limit(self):
+        """Rate limiting for ROR API to avoid being blocked"""
+        with self.lock:
+            current_time = time.time()
+            time_since_last = current_time - self.last_request_time
+            min_interval = 1.0 / self.requests_per_second
+            
+            if time_since_last < min_interval:
+                sleep_time = min_interval - time_since_last
+                time.sleep(sleep_time)
+            
+            self.last_request_time = time.time()
+            self.request_count += 1
+    
+    def search_ror_organization_batch(self, affiliation_names):
+        """Batch search for ROR organizations with parallel processing"""
+        results = {}
+        
+        if not affiliation_names:
+            return results
+        
+        # Filter out empty affiliations
+        valid_affiliations = [aff for aff in affiliation_names if aff and str(aff).strip()]
+        
+        if not valid_affiliations:
+            return results
+        
+        # Setup progress tracking
+        total_affiliations = len(valid_affiliations)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Process in parallel with ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, total_affiliations)) as executor:
+            # Create future mapping
+            future_to_affiliation = {
+                executor.submit(self._search_single_ror, aff): aff 
+                for aff in valid_affiliations
+            }
+            
+            completed = 0
+            for future in as_completed(future_to_affiliation):
+                affiliation = future_to_affiliation[future]
+                try:
+                    colab_ror, website = future.result()
+                    results[affiliation] = (colab_ror, website)
+                except Exception as e:
+                    print(f"Error searching ROR for {affiliation}: {str(e)}")
+                    results[affiliation] = (None, None)
+                
+                completed += 1
+                progress = completed / total_affiliations
+                progress_bar.progress(progress)
+                status_text.text(f"Searching ROR data: {completed}/{total_affiliations} affiliations")
+        
+        # Cleanup progress bars
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Print statistics
+        successful_searches = sum(1 for v in results.values() if v[0] is not None)
+        print(f"✅ ROR search completed: {successful_searches}/{total_affiliations} successful")
+        print(f"📊 ROR requests made: {self.request_count}")
+        
+        return results
+    
+    def _search_single_ror(self, affiliation_name):
+        """Search for single organization with optimized matching"""
+        try:
+            if not affiliation_name or not str(affiliation_name).strip():
+                return None, None
+            
+            # Apply rate limiting
+            self._rate_limit()
+            
+            # Use smart matching based on affiliation type
+            aff_lower = str(affiliation_name).lower().strip()
+            
+            # Fast path for academic institutions
+            if self._is_academic_institution(aff_lower):
+                return self._fast_ror_search(affiliation_name)
+            else:
+                return self._standard_ror_search(affiliation_name)
+                
+        except Exception as e:
+            print(f"Error in _search_single_ror for {affiliation_name}: {str(e)}")
+            return None, None
+    
+    def _is_academic_institution(self, affiliation_lower):
+        """Check if affiliation is likely an academic institution"""
+        academic_keywords = [
+            'university', 'college', 'institute', 'academy', 'school', 
+            'universität', 'universitat', 'université', 'universita',
+            'polytechnic', 'technical', 'research', 'laboratory', 'lab ',
+            'faculty', 'department', 'center for', 'centre for'
+        ]
+        return any(keyword in affiliation_lower for keyword in academic_keywords)
+    
+    def _fast_ror_search(self, affiliation_name):
+        """Fast search for academic institutions with exact matching"""
+        session = self.get_session()
+        
+        url = "https://api.ror.org/organizations"
+        params = {
+            'query': affiliation_name.strip(),
+            'page': 1,
+            'items': 3  # Limit results for speed
+        }
+        
+        try:
+            response = session.get(url, params=params, timeout=8)
+            response.raise_for_status()
+            
+            items = response.json().get('items', [])
+            if not items:
+                return None, None
+            
+            # Quick exact matching for academic institutions
+            query_clean = self._clean_affiliation_name(affiliation_name)
+            
+            for item in items:
+                name = self._clean_affiliation_name(item.get('name', ''))
+                
+                # Fast matching heuristics
+                if self._quick_name_match(query_clean, name):
+                    return self._extract_ror_info(item)
+            
+            # Fallback: return first result if no exact match
+            return self._extract_ror_info(items[0])
+            
+        except requests.exceptions.Timeout:
+            print(f"ROR timeout for: {affiliation_name}")
+            return None, None
+        except requests.exceptions.RequestException as e:
+            print(f"ROR request error for {affiliation_name}: {str(e)}")
+            return None, None
+        except Exception as e:
+            print(f"Unexpected ROR error for {affiliation_name}: {str(e)}")
+            return None, None
+    
+    def _standard_ror_search(self, affiliation_name):
+        """Standard search with comprehensive matching"""
+        session = self.get_session()
+        
+        url = "https://api.ror.org/organizations"
+        params = {'query': affiliation_name.strip()}
+        
+        try:
+            response = session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            items = response.json().get('items', [])
+            if not items:
+                return None, None
+            
+            # Comprehensive matching with scoring
+            best_match = None
+            best_score = -1
+            query_clean = self._clean_affiliation_name(affiliation_name)
+            
+            for item in items:
+                name = self._clean_affiliation_name(item.get('name', ''))
+                score = self._calculate_match_score(query_clean, name, item)
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = item
+            
+            # Return match if score is above threshold
+            if best_match and best_score > 30:
+                return self._extract_ror_info(best_match)
+            else:
+                return None, None
+                
+        except requests.exceptions.Timeout:
+            print(f"ROR timeout for: {affiliation_name}")
+            return None, None
+        except requests.exceptions.RequestException as e:
+            print(f"ROR request error for {affiliation_name}: {str(e)}")
+            return None, None
+        except Exception as e:
+            print(f"Unexpected ROR error for {affiliation_name}: {str(e)}")
+            return None, None
+    
+    def _clean_affiliation_name(self, name):
+        """Clean affiliation name for comparison"""
+        if not name:
+            return ""
+        
+        # Convert to lowercase and remove extra spaces
+        cleaned = ' '.join(str(name).lower().split())
+        
+        # Remove common stop words
+        stop_words = {'the', 'university', 'institute', 'college', 'of', 'and', 'for', 'at', 'in', 'on'}
+        words = cleaned.split()
+        filtered_words = [w for w in words if w not in stop_words]
+        
+        return ' '.join(filtered_words)
+    
+    def _quick_name_match(self, query, target):
+        """Quick name matching for academic institutions"""
+        if not query or not target:
+            return False
+        
+        # Exact match
+        if query == target:
+            return True
+        
+        # Contains match
+        if query in target or target in query:
+            return True
+        
+        # Word overlap match
+        query_words = set(query.split())
+        target_words = set(target.split())
+        common_words = query_words & target_words
+        
+        return len(common_words) >= 2  # At least 2 common words
+    
+    def _calculate_match_score(self, query, target, item):
+        """Calculate matching score between query and target"""
+        if not query or not target:
+            return 0
+        
+        score = 0
+        
+        # Exact match
+        if query == target:
+            score += 100
+        
+        # Contains match
+        elif query in target:
+            score += 80
+        elif target in query:
+            score += 70
+        
+        # Word overlap
+        query_words = set(query.split())
+        target_words = set(target.split())
+        common_words = query_words & target_words
+        
+        if common_words:
+            score += len(common_words) * 15
+        
+        # Boost score for academic institutions
+        types = item.get('types', [])
+        if any(t in ['Education', 'University', 'Institute', 'Research'] for t in types):
+            score += 20
+        
+        # Boost score for established organizations
+        established = item.get('established')
+        if established and established < 2000:  # Older than 2000
+            score += 10
+        
+        return score
+    
+    def _extract_ror_info(self, item):
+        """Extract ROR information from API response"""
+        if not item:
+            return None, None
+        
+        try:
+            # Extract ROR ID and Colab link
+            ror_id = item['id'].split('/')[-1]
+            colab_url = f"https://colab.ws/organizations/{ror_id}"
+            
+            # Extract website
+            website = None
+            links = item.get('links', []) or []
+            
+            for link in links:
+                if isinstance(link, dict):
+                    url = link.get('value') or link.get('url')
+                else:
+                    url = str(link)
+                
+                if url and isinstance(url, str):
+                    url = url.strip()
+                    if url.startswith(('http://', 'https://')):
+                        website = url
+                        break
+                    elif '.' in url and len(url) > 3:
+                        website = 'https://' + url
+                        break
+            
+            return colab_url, website
+            
+        except Exception as e:
+            print(f"Error extracting ROR info: {str(e)}")
+            return None, None
+    
+    def get_stats(self):
+        """Get service statistics"""
+        return {
+            'total_requests': self.request_count,
+            'max_workers': self.max_workers,
+            'requests_per_second': self.requests_per_second
+        }
+
+# Initialize global ROR service
+ror_service = RORService(max_workers=8, requests_per_second=5)
 
 # =============================================================================
 # ORIGINAL CODE (PRESERVED)
@@ -1392,15 +1410,11 @@ class JournalAnalyzerConfig:
         self.timeouts = {
             'crossref': 15,
             'openalex': 10,
-            'batch': 30,
-            'ror': 10,
-            'orcid': 10
+            'batch': 30
         }
         self.batch_sizes = {
             'metadata': 10,
-            'citations': 5,
-            'ror_lookup': 5,
-            'orcid_lookup': 3
+            'citations': 5
         }
 
 config = JournalAnalyzerConfig()
@@ -1802,11 +1816,55 @@ def analyze_overlaps(analyzed_metadata, citing_metadata, state):
 
 # === 12. Citation Accumulation Speed Analysis ===
 def analyze_citation_accumulation(analyzed_metadata, state):
-    """REMOVED: Citation accumulation analysis is no longer needed"""
+    accumulation_data = defaultdict(lambda: defaultdict(int))
+    yearly_citations = defaultdict(int)
+    
+    for analyzed in analyzed_metadata:
+        if analyzed and analyzed.get('crossref'):
+            analyzed_doi = analyzed['crossref'].get('DOI')
+            if not analyzed_doi:
+                continue
+                
+            pub_year = analyzed['crossref'].get('published', {}).get('date-parts', [[0]])[0][0]
+            if not pub_year:
+                continue
+            
+            citings = get_citing_dois_and_metadata((analyzed_doi, state))
+            
+            for citing in citings:
+                if citing.get('openalex'):
+                    cite_year = citing['openalex'].get('publication_year', 0)
+                    if cite_year >= pub_year:
+                        yearly_citations[cite_year] += 1
+                        years_since_pub = cite_year - pub_year
+                        if years_since_pub >= 0:
+                            for year in range(years_since_pub + 1):
+                                accumulation_data[pub_year][year] += 1
+    
+    accumulation_curves = {}
+    for pub_year, yearly_counts in accumulation_data.items():
+        sorted_years = sorted(yearly_counts.keys())
+        cumulative_counts = []
+        current_total = 0
+        for year in sorted_years:
+            current_total += yearly_counts[year]
+            cumulative_counts.append({
+                'years_since_publication': year,
+                'cumulative_citations': current_total
+            })
+        accumulation_curves[pub_year] = cumulative_counts
+    
+    yearly_stats = []
+    for year in sorted(yearly_citations.keys()):
+        yearly_stats.append({
+            'year': year,
+            'citations_count': yearly_citations[year]
+        })
+    
     return {
-        'accumulation_curves': {},
-        'yearly_citations': [],
-        'total_years_covered': 0
+        'accumulation_curves': dict(accumulation_curves),
+        'yearly_citations': yearly_stats,
+        'total_years_covered': len(yearly_citations)
     }
 
 # === 13. Metadata Processing for Statistics ===
@@ -2073,16 +2131,16 @@ def calculate_citation_timing_stats(analyzed_metadata, state):
                 first_citation_date, first_citing_doi = min(citation_dates, key=lambda x: x[0])
                 days_to_first_citation = (first_citation_date - analyzed_date).days
                 
-                # === EXCLUDE EDITORIAL NOTES ===
-                # Check if citing article is an editorial note
-                # (has same DOI prefix and same publication date)
+                # === ИСКЛЮЧЕНИЕ РЕДАКТОРСКИХ ЗАМЕТОК ===
+                # Проверяем, не является ли цитирующая статья редакторской заметкой
+                # (имеет тот же DOI-префикс и ту же дату публикации)
                 analyzed_prefix = get_doi_prefix(analyzed_doi)
                 citing_prefix = get_doi_prefix(first_citing_doi)
                 
                 same_prefix = (analyzed_prefix == citing_prefix)
                 same_date = (analyzed_date.date() == first_citation_date.date())
                 
-                # Exclude records with same prefix and same date (likely editorial notes)
+                # Исключаем записи с тем же префиксом и той же датой (вероятно редакторские заметки)
                 if not (same_prefix and same_date) and days_to_first_citation >= 0:
                     all_days_to_first_citation.append(days_to_first_citation)
                     first_citation_details.append({
@@ -2627,7 +2685,7 @@ def calculate_dbi_fast(analyzed_metadata):
         oa = meta.get('openalex')
         if oa and 'concepts' in oa:
             concepts = oa['concepts']
-            # === CHANGE: expand to 10 terms ===
+            # === ИЗМЕНЕНИЕ: расширяем до 10 терминов ===
             for concept in concepts[:10]:  # Take top-10 concepts
                 concept_name = concept.get('display_name', '')
                 if concept_name:
@@ -2649,7 +2707,7 @@ def calculate_dbi_fast(analyzed_metadata):
         'DBI': round(dbi, 3),
         'unique_concepts': len(concept_freq),
         'total_concept_mentions': total_concepts,
-        # === CHANGE: expand to 10 terms ===
+        # === ИЗМЕНЕНИЕ: расширяем до 10 терминов ===
         'top_concepts': concept_freq.most_common(10)
     }
 
@@ -3191,22 +3249,22 @@ def find_potential_reviewers(analyzed_metadata, citing_metadata, overlap_details
 # === NEW CLASS FOR TITLE KEYWORDS ANALYSIS ===
 class TitleKeywordsAnalyzer:
     def __init__(self):
-        # Initialize stop words and stemmer
+        # Инициализация стоп-слов и стеммера
         try:
             import nltk
             from nltk.corpus import stopwords
             from nltk.stem import PorterStemmer
             
-            # Load stop words
+            # Загружаем стоп-слова
             nltk.download('stopwords', quiet=True)
             self.stop_words = set(stopwords.words('english'))
             self.stemmer = PorterStemmer()
         except:
-            # Fallback if nltk is not available
+            # Fallback если nltk не доступен
             self.stop_words = {'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
             self.stemmer = None
         
-        # Scientific stop words
+        # Научные стоп-слова
         self.scientific_stopwords = {
             'activation', 'adaptive', 'advanced', 'analysis', 'application',
             'applications', 'approach', 'architecture', 'artificial', 'assessment',
@@ -3241,7 +3299,7 @@ class TitleKeywordsAnalyzer:
             'value', 'variation', 'virtual', 'waste', 'wave'
         }
         
-        # Stemming scientific stop words
+        # Стемминг научных стоп-слов
         if self.stemmer:
             self.scientific_stopwords_stemmed = {
                 self.stemmer.stem(word) for word in self.scientific_stopwords
@@ -3250,8 +3308,8 @@ class TitleKeywordsAnalyzer:
             self.scientific_stopwords_stemmed = self.scientific_stopwords
     
     def preprocess_content_words(self, text: str) -> List[str]:
-        """Clean and normalize content words (removed word 'sub')"""
-        if not text or text in ['Title not found', 'Request timeout', 'Network error', 'Error while fetching']:
+        """Очищает и нормализует содержательные слова (удалено слово 'sub')"""
+        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
             return []
 
         text = text.lower()
@@ -3262,7 +3320,7 @@ class TitleKeywordsAnalyzer:
         content_words = []
 
         for word in words:
-            # EXCLUDE word "sub"
+            # ИСКЛЮЧАЕМ слово "sub"
             if word == 'sub':
                 continue
             if '-' in word:
@@ -3278,8 +3336,8 @@ class TitleKeywordsAnalyzer:
         return content_words
 
     def extract_compound_words(self, text: str) -> List[str]:
-        """Extract compound words with hyphen"""
-        if not text or text in ['Title not found', 'Request timeout', 'Network error', 'Error while fetching']:
+        """Извлекает составные слова через дефис"""
+        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
             return []
 
         text = text.lower()
@@ -3294,8 +3352,8 @@ class TitleKeywordsAnalyzer:
         return filtered_compounds
 
     def extract_scientific_stopwords(self, text: str) -> List[str]:
-        """Extract scientific stop words"""
-        if not text or text in ['Title not found', 'Request timeout', 'Network error', 'Error while fetching']:
+        """Извлекает научные стоп-слова"""
+        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
             return []
 
         text = text.lower()
@@ -3324,32 +3382,32 @@ class TitleKeywordsAnalyzer:
         return scientific_words
 
     def analyze_titles(self, analyzed_titles: List[str], citing_titles: List[str]) -> dict:
-        """Analyze keywords in analyzed and citing article titles"""
-        # Analysis of analyzed articles
+        """Анализирует ключевые слова в названиях анализируемых и цитирующих статей"""
+        # Анализ анализируемых статей
         analyzed_content_words = []
         analyzed_compound_words = []
         analyzed_scientific_words = []
         
-        valid_analyzed_titles = [t for t in analyzed_titles if t and t not in ['Title not found', 'Request timeout', 'Network error', 'Error while fetching']]
+        valid_analyzed_titles = [t for t in analyzed_titles if t and t not in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']]
         
         for title in valid_analyzed_titles:
             analyzed_content_words.extend(self.preprocess_content_words(title))
             analyzed_compound_words.extend(self.extract_compound_words(title))
             analyzed_scientific_words.extend(self.extract_scientific_stopwords(title))
         
-        # Analysis of citing articles
+        # Анализ цитирующих статей
         citing_content_words = []
         citing_compound_words = []
         citing_scientific_words = []
         
-        valid_citing_titles = [t for t in citing_titles if t and t not in ['Title not found', 'Request timeout', 'Network error', 'Error while fetching']]
+        valid_citing_titles = [t for t in citing_titles if t and t not in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']]
         
         for title in valid_citing_titles:
             citing_content_words.extend(self.preprocess_content_words(title))
             citing_compound_words.extend(self.extract_compound_words(title))
             citing_scientific_words.extend(self.extract_scientific_stopwords(title))
         
-        # Count frequencies
+        # Подсчет частот
         analyzed_content_freq = Counter(analyzed_content_words)
         analyzed_compound_freq = Counter(analyzed_compound_words)
         analyzed_scientific_freq = Counter(analyzed_scientific_words)
@@ -3358,7 +3416,7 @@ class TitleKeywordsAnalyzer:
         citing_compound_freq = Counter(citing_compound_words)
         citing_scientific_freq = Counter(citing_scientific_words)
         
-        # Top-50 for each type
+        # Топ-50 для каждого типа
         top_50_analyzed_content = analyzed_content_freq.most_common(50)
         top_50_analyzed_compound = analyzed_compound_freq.most_common(50)
         top_50_analyzed_scientific = analyzed_scientific_freq.most_common(50)
@@ -3383,7 +3441,7 @@ class TitleKeywordsAnalyzer:
         }
 
 def extract_titles_from_metadata(metadata_list):
-    """Extract article titles from metadata"""
+    """Извлекает названия статей из метаданных"""
     titles = []
     for meta in metadata_list:
         if not meta:
@@ -3406,42 +3464,42 @@ def extract_titles_from_metadata(metadata_list):
     return titles
 
 def normalize_author_name(author_name):
-    """Normalize author name - keep only first initial"""
+    """Нормализация имени автора - оставляем только первый инициал"""
     if not author_name:
         return author_name
     
-    # Remove extra dots (fix Pikalova E..Y. -> Pikalova E.Y.)
+    # Убираем лишние точки (исправляем Pikalova E..Y. -> Pikalova E.Y.)
     author_name = re.sub(r'\.\.', '.', author_name)
     
-    # Split surname and initials
+    # Разделяем фамилию и инициалы
     parts = author_name.split()
     if len(parts) < 2:
         return author_name
     
-    # Take surname (first part) and first initial
+    # Берем фамилию (первая часть) и первый инициал
     surname = parts[0]
     initials = parts[1]
     
-    # Take only first letter of initials (first initial)
+    # Берем только первую букву инициалов (первый инициал)
     if '.' in initials:
-        # If initials with dots: "E.Y." -> take "E."
+        # Если инициалы с точками: "E.Y." -> берем "E."
         first_initials = re.findall(r'[A-Z]\.', initials)
         if first_initials:
             first_initial = first_initials[0]
         else:
-            # If different format, take first letter
+            # Если формат другой, берем первую букву
             first_initial = initials[0] + '.' if len(initials) > 0 else ''
     else:
-        # If without dots: "EY" -> take "E."
+        # Если без точек: "EY" -> берем "E."
         first_initial = initials[0] + '.' if len(initials) > 0 else ''
     
     return f"{surname} {first_initial}".strip()
 
 def normalize_keywords_data(keywords_data):
-    """Normalize keywords data for combined sheet"""
+    """Нормализация данных ключевых слов для объединенного листа"""
     normalized_data = []
     
-    # Normalization for content words
+    # Нормализация для content words
     analyzed_total = keywords_data['analyzed']['total_titles']
     citing_total = keywords_data['citing']['total_titles']
     
@@ -3449,7 +3507,7 @@ def normalize_keywords_data(keywords_data):
     for i, (word, analyzed_count) in enumerate(keywords_data['analyzed']['content_words'], 1):
         citing_count = next((c for w, c in keywords_data['citing']['content_words'] if w == word), 0)
         
-        # Normalize frequencies
+        # Нормализация частот
         norm_analyzed = analyzed_count / analyzed_total if analyzed_total > 0 else 0
         norm_citing = citing_count / citing_total if citing_total > 0 else 0
         total_norm = norm_analyzed + norm_citing
@@ -3503,10 +3561,10 @@ def normalize_keywords_data(keywords_data):
             'Ratio_Analyzed/Citing': round(ratio, 2)
         })
     
-    # Sort by descending Norm_Citing
+    # Сортировка по убыванию Norm_Citing
     normalized_data.sort(key=lambda x: x['Norm_Citing'], reverse=True)
     
-    # Update ranks after sorting
+    # Обновляем ранги после сортировки
     for i, item in enumerate(normalized_data, 1):
         item['Rank'] = i
     
@@ -3514,10 +3572,10 @@ def normalize_keywords_data(keywords_data):
 
 # === NEW FUNCTION FOR SPECIAL ANALYSIS METRICS ===
 def create_issn_lookup_cache():
-    """Create cache for fast ISSN searching in databases"""
+    """Создает кэш для быстрого поиска ISSN в базах данных"""
     state = get_analysis_state()
     
-    # Cache for Scopus (CS.xlsx)
+    # Кэш для Scopus (CS.xlsx)
     scopus_issn_cache = set()
     if not state.cs_data.empty:
         print("🔍 Building Scopus ISSN cache...")
@@ -3530,7 +3588,7 @@ def create_issn_lookup_cache():
                         scopus_issn_cache.add(normalized)
         print(f"✅ Scopus cache built: {len(scopus_issn_cache)} ISSNs")
     
-    # Cache for WoS (IF.xlsx)
+    # Кэш для WoS (IF.xlsx)
     wos_issn_cache = set()
     if not state.if_data.empty:
         print("🔍 Building WoS ISSN cache...")
@@ -3546,7 +3604,7 @@ def create_issn_lookup_cache():
     return scopus_issn_cache, wos_issn_cache
 
 def get_all_issns_from_work(work):
-    """Quickly extract all ISSNs from work"""
+    """Быстро извлекает все ISSN из работы"""
     issns = set()
     if not work:
         return issns
@@ -3742,10 +3800,10 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
             # Initialize citing article usage tracking if not exists
             if citing_doi not in citing_articles_usage:
                 citing_articles_usage[citing_doi] = {
-                    'used_for_sc': True,  # or False depending on conditions
-                    'used_for_sc_corr': True,  # or False  
-                    'used_for_if': True,  # or False
-                    'used_for_if_corr': True  # or False
+                    'used_for_sc': True,  # или False в зависимости от условий
+                    'used_for_sc_corr': True,  # или False  
+                    'used_for_if': True,  # или False
+                    'used_for_if_corr': True  # или False
                 }
             
             # Get citing work publication date
@@ -3842,10 +3900,202 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
 
 # === NEW FUNCTIONS FOR COMBINED SHEETS ===
 
-def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles):
-    """Create combined sheet for analyzed and citing article authors"""
+def search_ror_organization(affiliation_name):
+    """Search for organization in ROR database and return best match with improved matching"""
+    try:
+        if not affiliation_name or affiliation_name.strip() == '':
+            return None, None
+            
+        print(f"🔍 Searching ROR for: '{affiliation_name}'")
+        
+        # Search ROR API
+        url = "https://api.ror.org/organizations"
+        params = {'query': affiliation_name.strip()}
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        items = response.json().get('items', [])
+        print(f"📊 Found {len(items)} potential matches")
+        
+        if not items:
+            return None, None
+        
+        # Find best match using improved fuzzy matching
+        best_match = None
+        best_score = -1
+        
+        query_lower = affiliation_name.strip().lower()
+        
+        for i, item in enumerate(items):
+            name = item.get('name', '').lower()
+            aliases = [a.lower() for a in item.get('aliases', [])]
+            acronyms = [a.lower() for a in item.get('acronyms', []) if a]
+            
+            # All possible name variations
+            all_names = [name] + aliases + acronyms
+            
+            # Calculate score for each name variation
+            for test_name in all_names:
+                score = 0
+                
+                # Exact match
+                if query_lower == test_name:
+                    score = 10000
+                # Contains query
+                elif query_lower in test_name:
+                    score = 8000
+                # Query contains organization name
+                elif test_name in query_lower:
+                    score = 7000
+                # Fuzzy matching
+                else:
+                    try:
+                        from thefuzz import fuzz
+                        score = fuzz.token_set_ratio(query_lower, test_name)
+                        # Boost score for longer matches
+                        if len(test_name) > 10:
+                            score = int(score * 1.1)
+                    except ImportError:
+                        # Fallback simple matching
+                        common_words = len(set(query_lower.split()) & set(test_name.split()))
+                        score = common_words * 20
+                
+                # Additional scoring based on organization type
+                org_type = item.get('types', [])
+                if any(t in ['Education', 'University', 'Institute'] for t in org_type):
+                    score += 100
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = item
+                    print(f"🎯 New best match: {name} (score: {score})")
+        
+        print(f"🏆 Best match selected: {best_match.get('name') if best_match else 'None'} with score {best_score}")
+        
+        if best_match and best_score > 50:  # Minimum threshold
+            # Extract ROR ID and website
+            ror_id = best_match['id'].split('/')[-1]
+            colab_url = f"https://colab.ws/organizations/{ror_id}"
+            
+            # Extract website
+            website = None
+            links = best_match.get('links', []) or []
+            for link in links:
+                if isinstance(link, dict):
+                    url = link.get('value') or link.get('url')
+                else:
+                    url = str(link)
+                    
+                if url and isinstance(url, str):
+                    url = url.strip()
+                    if url.startswith('http'):
+                        website = url
+                        break
+                    elif '.' in url:  # Likely a website
+                        website = 'https://' + url
+                        break
+            
+            print(f"✅ Found: Colab-ROR: {colab_url}, Website: {website}")
+            return colab_url, website
+        else:
+            print(f"❌ No good match found (best score: {best_score})")
+            return None, None
+        
+    except Exception as e:
+        print(f"🚨 Error searching ROR for '{affiliation_name}': {str(e)}")
+        return None, None
+
+def search_ror_organization_cached(affiliation_name, cache_dict):
+    """Cached version of ROR search to avoid duplicate API calls"""
+    if not affiliation_name:
+        return None, None
+        
+    # Use cache to avoid duplicate API calls
+    cache_key = affiliation_name.strip().lower()
     
-    # Normalize author names and combine counters
+    if cache_key in cache_dict:
+        return cache_dict[cache_key]
+    
+    # Perform search
+    colab_ror, website = search_ror_organization(affiliation_name)
+    
+    # Cache the result
+    cache_dict[cache_key] = (colab_ror, website)
+    
+    return colab_ror, website
+
+# === OPTIMIZED VERSION OF COMBINED AFFILIATIONS SHEET ===
+def create_combined_affiliations_sheet_fast(analyzed_affiliations_data, citing_affiliations_data, analyzed_total_mentions, citing_total_mentions):
+    """Fast version of combined affiliations sheet using optimized ROR service"""
+    
+    analyzed_affiliations = Counter(dict(analyzed_affiliations_data))
+    citing_affiliations = Counter(dict(citing_affiliations_data))
+    
+    combined_data = []
+    all_affiliations = set(analyzed_affiliations.keys()) | set(citing_affiliations.keys())
+    
+    # Use optimized ROR service for batch searching
+    affiliation_list = list(all_affiliations)
+    ror_results = ror_service.search_ror_organization_batch(affiliation_list)
+    
+    for affiliation in all_affiliations:
+        analyzed_count = analyzed_affiliations.get(affiliation, 0)
+        citing_count = citing_affiliations.get(affiliation, 0)
+        total_mentions = analyzed_count + citing_count
+        
+        # Рассчитываем проценты
+        analyzed_pct = (analyzed_count / analyzed_total_mentions * 100) if analyzed_total_mentions > 0 else 0
+        citing_pct = (citing_count / citing_total_mentions * 100) if citing_total_mentions > 0 else 0
+        
+        # Определяем статус аффилиации
+        if analyzed_count > 0 and citing_count > 0:
+            affiliation_status = "Both"
+        elif analyzed_count > 0:
+            affiliation_status = "Analyzed Only"
+        else:
+            affiliation_status = "Citing Only"
+        
+        # Рассчитываем Engagement Score (процент публикаций от общей активности)
+        engagement_score_pct = (analyzed_count / total_mentions * 100) if total_mentions > 0 else 0
+        
+        # Определяем Activity Balance
+        if affiliation_status == "Analyzed Only":
+            activity_balance = "Publishing-Only"
+        elif affiliation_status == "Citing Only":
+            activity_balance = "Citing-Only"
+        elif engagement_score_pct >= 70:
+            activity_balance = "Publishing-Heavy"
+        elif engagement_score_pct >= 30:
+            activity_balance = "Balanced"
+        else:
+            activity_balance = "Citing-Heavy"
+        
+        # Get ROR information from optimized service results
+        colab_ror, website = ror_results.get(affiliation, (None, None))
+        
+        combined_data.append({
+            'Affiliation': affiliation,
+            'Colab-ROR': colab_ror if colab_ror else '',
+            'Website': website if website else '',
+            'Total': total_mentions,
+            'Status': affiliation_status,
+            'Analyzed_Count': analyzed_count,
+            'Citing_Count': citing_count,
+            'Engagement_Score': f"{engagement_score_pct:.1f}%",
+            'Activity_Balance': activity_balance,
+            'Analyzed_Pct': round(analyzed_pct, 2),
+            'Citing_Pct': round(citing_pct, 2)
+        })
+    
+    # Сортируем по общему количеству упоминаний (убывание)
+    combined_data.sort(key=lambda x: x['Total'], reverse=True)
+    
+    return combined_data
+    
+def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles):
+    """Создает объединенный лист авторов анализируемых и цитирующих статей"""
+    
+    # Нормализуем имена авторов и объединяем счетчики
     def normalize_and_aggregate(authors_list):
         normalized_counts = Counter()
         for author, count in authors_list:
@@ -3864,11 +4114,11 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         citing_count = citing_authors.get(author, 0)
         total_publications = analyzed_count + citing_count
         
-        # Calculate percentages
+        # Рассчитываем проценты
         analyzed_pct = (analyzed_count / analyzed_total_articles * 100) if analyzed_total_articles > 0 else 0
         citing_pct = (citing_count / citing_total_articles * 100) if citing_total_articles > 0 else 0
         
-        # Determine author status
+        # Определяем статус автора
         if analyzed_count > 0 and citing_count > 0:
             author_status = "Both"
         elif analyzed_count > 0:
@@ -3876,10 +4126,10 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         else:
             author_status = "Citing Only"
         
-        # Calculate Loyalty Score (percentage of publications from total activity)
+        # Рассчитываем Loyalty Score (процент публикаций от общей активности)
         loyalty_score_pct = (analyzed_count / total_publications * 100) if total_publications > 0 else 0
         
-        # Determine Activity Balance
+        # Определяем Activity Balance
         if author_status == "Analyzed Only":
             activity_balance = "Publishing-Only"
         elif author_status == "Citing Only":
@@ -3891,14 +4141,8 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         else:
             activity_balance = "Citing-Heavy"
         
-        # Extract surname and initials for ORCID search
-        parts = author.split()
-        surname = parts[0] if parts else ""
-        given_name_initials = parts[1] if len(parts) > 1 else ""
-        
         combined_data.append({
             'Author': author,
-            'Affiliation': '',  # Placeholder for affiliation data
             'Total': total_publications,
             'Status': author_status,
             'Analyzed_Count': analyzed_count,
@@ -3906,20 +4150,16 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
             'Loyalty_Score': f"{loyalty_score_pct:.1f}%",
             'Activity_Balance': activity_balance,
             'Analyzed_Pct': round(analyzed_pct, 2),
-            'Citing_Pct': round(citing_pct, 2),
-            '': '',  # Empty column
-            'ORCID ID': '',  # Placeholder for ORCID data
-            'Scopus ID': '',  # Placeholder for Scopus ID
-            'WoS ID': ''  # Placeholder for WoS ID
+            'Citing_Pct': round(citing_pct, 2)
         })
     
-    # Sort by total publications (descending)
+    # Сортируем по общему количеству публикаций (убывание)
     combined_data.sort(key=lambda x: x['Total'], reverse=True)
     
     return combined_data
 
 def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affiliations_data, analyzed_total_mentions, citing_total_mentions):
-    """Create combined sheet for analyzed and citing article affiliations"""
+    """Создает объединенный лист аффилиаций анализируемых и цитирующих статей"""
     
     analyzed_affiliations = Counter(dict(analyzed_affiliations_data))
     citing_affiliations = Counter(dict(citing_affiliations_data))
@@ -3932,11 +4172,11 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
         citing_count = citing_affiliations.get(affiliation, 0)
         total_mentions = analyzed_count + citing_count
         
-        # Calculate percentages
+        # Рассчитываем проценты
         analyzed_pct = (analyzed_count / analyzed_total_mentions * 100) if analyzed_total_mentions > 0 else 0
         citing_pct = (citing_count / citing_total_mentions * 100) if citing_total_mentions > 0 else 0
         
-        # Determine affiliation status
+        # Определяем статус аффилиации
         if analyzed_count > 0 and citing_count > 0:
             affiliation_status = "Both"
         elif analyzed_count > 0:
@@ -3944,10 +4184,10 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
         else:
             affiliation_status = "Citing Only"
         
-        # Calculate Engagement Score (percentage of publications from total activity)
+        # Рассчитываем Engagement Score (процент публикаций от общей активности)
         engagement_score_pct = (analyzed_count / total_mentions * 100) if total_mentions > 0 else 0
         
-        # Determine Activity Balance
+        # Определяем Activity Balance
         if affiliation_status == "Analyzed Only":
             activity_balance = "Publishing-Only"
         elif affiliation_status == "Citing Only":
@@ -3959,14 +4199,13 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
         else:
             activity_balance = "Citing-Heavy"
         
-        # Get ROR information
-        state = get_analysis_state()
-        ror_info = state.ror_client.get_organization_info(affiliation)
+        # Search for ROR information
+        colab_ror, website = search_ror_organization(affiliation)
         
         combined_data.append({
             'Affiliation': affiliation,
-            'Colab-ROR': ror_info.get('colab_url', ''),
-            'Website': ror_info.get('website', ''),
+            'Colab-ROR': colab_ror if colab_ror else '',
+            'Website': website if website else '',
             'Total': total_mentions,
             'Status': affiliation_status,
             'Analyzed_Count': analyzed_count,
@@ -3977,13 +4216,13 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
             'Citing_Pct': round(citing_pct, 2)
         })
     
-    # Sort by total mentions (descending)
+    # Сортируем по общему количеству упоминаний (убывание)
     combined_data.sort(key=lambda x: x['Total'], reverse=True)
     
     return combined_data
 
 def create_combined_countries_sheet(analyzed_countries_data, citing_countries_data, analyzed_total_mentions, citing_total_mentions):
-    """Create combined sheet for analyzed and citing article countries"""
+    """Создает объединенный лист стран анализируемых и цитирующих статей"""
     
     analyzed_countries = Counter(dict(analyzed_countries_data))
     citing_countries = Counter(dict(citing_countries_data))
@@ -3996,11 +4235,11 @@ def create_combined_countries_sheet(analyzed_countries_data, citing_countries_da
         citing_count = citing_countries.get(country, 0)
         total_mentions = analyzed_count + citing_count
         
-        # Calculate percentages
+        # Рассчитываем проценты
         analyzed_pct = (analyzed_count / analyzed_total_mentions * 100) if analyzed_total_mentions > 0 else 0
         citing_pct = (citing_count / citing_total_mentions * 100) if citing_total_mentions > 0 else 0
         
-        # Determine country status
+        # Определяем статус страны
         if analyzed_count > 0 and citing_count > 0:
             country_status = "Both"
         elif analyzed_count > 0:
@@ -4008,10 +4247,10 @@ def create_combined_countries_sheet(analyzed_countries_data, citing_countries_da
         else:
             country_status = "Citing Only"
         
-        # Calculate Self-Sufficiency (share of local activity)
+        # Рассчитываем Self-Sufficiency (доля локальной активности)
         self_sufficiency_pct = (analyzed_count / total_mentions * 100) if total_mentions > 0 else 0
         
-        # Calculate Global Reach (share of international activity)
+        # Рассчитываем Global Reach (доля международной активности)
         global_reach_pct = (citing_count / total_mentions * 100) if total_mentions > 0 else 0
         
         combined_data.append({
@@ -4026,149 +4265,10 @@ def create_combined_countries_sheet(analyzed_countries_data, citing_countries_da
             'Citing_Pct': round(citing_pct, 2)
         })
     
-    # Sort by total mentions (descending)
+    # Сортируем по общему количеству упоминаний (убывание)
     combined_data.sort(key=lambda x: x['Total'], reverse=True)
     
     return combined_data
-
-# === NEW FUNCTIONS FOR ROR AND ORCID DATA COLLECTION ===
-
-def enrich_affiliations_with_ror(combined_affiliations_data):
-    """Enrich affiliations with ROR data using parallel processing"""
-    state = get_analysis_state()
-    
-    if not combined_affiliations_data:
-        return combined_affiliations_data
-    
-    # Create progress bar
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    def process_affiliation(affiliation_item):
-        """Process single affiliation to get ROR data"""
-        affiliation = affiliation_item['Affiliation']
-        if not affiliation:
-            return affiliation_item
-        
-        # Get ROR information
-        ror_info = state.ror_client.get_organization_info(affiliation)
-        
-        # Update affiliation item with ROR data
-        affiliation_item['Colab-ROR'] = ror_info.get('colab_url', '')
-        affiliation_item['Website'] = ror_info.get('website', '')
-        
-        return affiliation_item
-    
-    # Process affiliations in parallel
-    with ThreadPoolExecutor(max_workers=min(5, len(combined_affiliations_data))) as executor:
-        futures = []
-        for i, affiliation_item in enumerate(combined_affiliations_data):
-            future = executor.submit(process_affiliation, affiliation_item)
-            futures.append(future)
-        
-        # Update progress
-        results = []
-        for i, future in enumerate(as_completed(futures)):
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception as e:
-                # If processing fails, keep original item
-                results.append(combined_affiliations_data[i])
-            
-            # Update progress
-            progress = (i + 1) / len(futures)
-            progress_bar.progress(progress)
-            status_text.text(f"Enriching affiliations with ROR data: {i + 1}/{len(futures)}")
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    return results
-
-def enrich_authors_with_orcid(combined_authors_data):
-    """Enrich authors with ORCID data using parallel processing"""
-    state = get_analysis_state()
-    
-    if not combined_authors_data:
-        return combined_authors_data
-    
-    # Create progress bar
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    def process_author(author_item):
-        """Process single author to get ORCID data"""
-        author = author_item['Author']
-        if not author:
-            return author_item
-        
-        # Extract surname and initials
-        parts = author.split()
-        if len(parts) < 2:
-            return author_item
-        
-        surname = parts[0]
-        given_name_initials = parts[1]
-        
-        # Search for author in ORCID
-        orcid_results = state.orcid_client.search_author(surname, given_name_initials, author_item.get('Affiliation', ''))
-        
-        if orcid_results:
-            # Take the first result (best match)
-            orcid_id = orcid_results[0].get('orcid-identifier', {}).get('path', '')
-            if orcid_id:
-                # Get complete profile
-                profile = state.orcid_client.get_complete_profile(orcid_id)
-                
-                # Update author item with ORCID data
-                author_item['ORCID ID'] = f"https://orcid.org/{orcid_id}"
-                
-                # Extract other identifiers
-                other_ids = profile.get('other_identifiers', [])
-                for id_item in other_ids:
-                    id_type = id_item.get('type', '').upper()
-                    id_url = id_item.get('url', '')
-                    
-                    if 'SCOPUS' in id_type and id_url:
-                        author_item['Scopus ID'] = id_url
-                    elif 'RESEARCHERID' in id_type and id_url:
-                        author_item['WoS ID'] = id_url
-        
-        return author_item
-    
-    # Process authors in parallel (limited to avoid rate limiting)
-    batch_size = min(3, len(combined_authors_data))
-    with ThreadPoolExecutor(max_workers=batch_size) as executor:
-        futures = []
-        for i, author_item in enumerate(combined_authors_data[:50]):  # Limit to top 50 authors
-            future = executor.submit(process_author, author_item)
-            futures.append(future)
-        
-        # Update progress and collect results
-        results = []
-        for i, future in enumerate(as_completed(futures)):
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception as e:
-                # If processing fails, keep original item
-                if i < len(combined_authors_data):
-                    results.append(combined_authors_data[i])
-            
-            # Update progress
-            progress = (i + 1) / len(futures)
-            progress_bar.progress(progress)
-            status_text.text(f"Enriching authors with ORCID data: {i + 1}/{len(futures)}")
-    
-    # Add remaining authors without processing
-    if len(combined_authors_data) > 50:
-        results.extend(combined_authors_data[50:])
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    return results
 
 # === 17. Enhanced Excel Report Creation ===
 def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
@@ -4314,11 +4414,11 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 overlap_df = pd.DataFrame(overlap_list)
                 overlap_df.to_excel(writer, sheet_name='Work_Overlaps', index=False)
 
-            # Sheet 4: Time to first citation (WITH EXCLUSION OF EDITORIAL NOTES)
+            # Sheet 4: Time to first citation (С ИСКЛЮЧЕНИЕМ РЕДАКТОРСКИХ ЗАМЕТОК)
             first_citation_list = []
             for detail in citation_timing.get('first_citation_details', []):
-                # === EXCLUDE EDITORIAL NOTES ===
-                # Do not include records with same prefix and same date
+                # === ИСКЛЮЧЕНИЕ РЕДАКТОРСКИХ ЗАМЕТОК ===
+                # Не включаем записи с тем же префиксом и той же датой
                 if detail.get('same_prefix', False) and detail.get('same_date', False):
                     continue
                     
@@ -4336,7 +4436,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 first_citation_df = pd.DataFrame(first_citation_list)
                 first_citation_df.to_excel(writer, sheet_name='First_Citations', index=False)
 
-            # Sheet 5: Combined Statistics (NEW - combined sheet)
+            # Sheet 5: Combined Statistics (NEW - объединенный лист)
             statistics_data = {
                 'Metric': [
                     'Total Articles', 
@@ -4420,7 +4520,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     safe_convert(citing_stats['unique_countries_count']),
                     safe_convert(citing_stats['unique_journals_count']),
                     safe_convert(citing_stats['unique_publishers_count']),
-                    'N/A',  # Articles with ≥10 citations (not applicable for citing)
+                    'N/A',  # Articles with ≥10 citations (для цитирующих не применимо)
                     'N/A',  # Articles with ≥20 citations
                     'N/A',  # Articles with ≥30 citations
                     'N/A'   # Articles with ≥50 citations
@@ -4429,7 +4529,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             statistics_df = pd.DataFrame(statistics_data)
             statistics_df.to_excel(writer, sheet_name='Statistics', index=False)
 
-            # Sheet 6: Combined Citing Stats (NEW - combined sheet Enhanced_Statistics and Citation_Timing)
+            # Sheet 6: Combined Citing Stats (NEW - объединенный лист Enhanced_Statistics и Citation_Timing)
             citing_stats_data = {
                 'Metric': [
                     'H-index', 'Total Citations',
@@ -4474,7 +4574,23 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 yearly_citations_df = pd.DataFrame(yearly_citations_data)
                 yearly_citations_df.to_excel(writer, sheet_name='Citations_by_Year', index=False)
 
-            # Sheet 8: Citation network (SORTED BY YEARS)
+            # Sheet 8: Citation accumulation curves (СОРТИРОВКА ПО ГОДАМ)
+            accumulation_data = []
+            for pub_year, curve_data in citation_timing['accumulation_curves'].items():
+                for data_point in curve_data:
+                    accumulation_data.append({
+                        'Publication_Year': safe_convert(pub_year),
+                        'Years_Since_Publication': safe_convert(data_point['years_since_publication']),
+                        'Cumulative_Citations': safe_convert(data_point['cumulative_citations'])
+                    })
+            
+            # === СОРТИРОВКА: сначала по году публикации, затем по годам после публикации ===
+            if accumulation_data:
+                accumulation_df = pd.DataFrame(accumulation_data)
+                accumulation_df = accumulation_df.sort_values(['Publication_Year', 'Years_Since_Publication'])
+                accumulation_df.to_excel(writer, sheet_name='Citation_Accumulation_Curves', index=False)
+
+            # Sheet 9: Citation network (СОРТИРОВКА ПО ГОДАМ)
             citation_network_data = []
             for year, citing_years in enhanced_stats.get('citation_network', {}).items():
                 year_counts = Counter(citing_years)
@@ -4485,7 +4601,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_Count': safe_convert(count)
                     })
             
-            # === SORTING: first by publication year, then by citation year ===
+            # === СОРТИРОВКА: сначала по году публикации, затем по году цитирования ===
             if citation_network_data:
                 citation_network_df = pd.DataFrame(citation_network_data)
                 citation_network_df = citation_network_df.sort_values(['Publication_Year', 'Citation_Year'])
@@ -4493,39 +4609,30 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
 
             # === NEW COMBINED SHEETS ===
 
-            # Sheet 9: Combined Authors (REPLACES All_Authors_Analyzed and All_Authors_Citing)
+            # Sheet 10: Combined Authors (REPLACES All_Authors_Analyzed and All_Authors_Citing)
             combined_authors_data = create_combined_authors_sheet(
                 analyzed_stats['all_authors'],
                 citing_stats['all_authors'],
                 analyzed_stats['n_items'],
                 citing_stats['n_items']
             )
-            
-            # Enrich authors with ORCID data
-            st.info("🔍 Enriching authors with ORCID data...")
-            combined_authors_data = enrich_authors_with_orcid(combined_authors_data)
-            
             if combined_authors_data:
                 combined_authors_df = pd.DataFrame(combined_authors_data)
                 combined_authors_df.to_excel(writer, sheet_name='Combined_Authors', index=False)
 
-            # Sheet 10: Combined Affiliations (REPLACES All_Affiliations_Analyzed and All_Affiliations_Citing)
-            combined_affiliations_data = create_combined_affiliations_sheet(
+            # Sheet 11: Combined Affiliations (REPLACES All_Affiliations_Analyzed and All_Affiliations_Citing)
+            # USE OPTIMIZED VERSION HERE
+            combined_affiliations_data = create_combined_affiliations_sheet_fast(
                 analyzed_stats['all_affiliations'],
                 citing_stats['all_affiliations'],
                 sum(count for _, count in analyzed_stats['all_affiliations']),
                 sum(count for _, count in citing_stats['all_affiliations'])
             )
-            
-            # Enrich affiliations with ROR data
-            st.info("🔍 Enriching affiliations with ROR data...")
-            combined_affiliations_data = enrich_affiliations_with_ror(combined_affiliations_data)
-            
             if combined_affiliations_data:
                 combined_affiliations_df = pd.DataFrame(combined_affiliations_data)
                 combined_affiliations_df.to_excel(writer, sheet_name='Combined_Affiliations', index=False)
 
-            # Sheet 11: Combined Countries (REPLACES All_Countries_Analyzed and All_Countries_Citing)
+            # Sheet 12: Combined Countries (REPLACES All_Countries_Analyzed and All_Countries_Citing)
             combined_countries_data = create_combined_countries_sheet(
                 analyzed_stats['all_countries'],
                 citing_stats['all_countries'],
@@ -4536,7 +4643,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 combined_countries_df = pd.DataFrame(combined_countries_data)
                 combined_countries_df.to_excel(writer, sheet_name='Combined_Countries', index=False)
 
-            # Sheet 12: All journals citing (with percentages) - UPDATED VERSION WITH CS DATA
+            # Sheet 13: All journals citing (with percentages) - UPDATED VERSION WITH CS DATA
             if citing_stats['all_journals']:
                 all_citing_journals_data = []
                 total_citing_articles = safe_convert(citing_stats['n_items'])
@@ -4591,7 +4698,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 all_citing_journals_df = pd.DataFrame(all_citing_journals_data)
                 all_citing_journals_df.to_excel(writer, sheet_name='All_Journals_Citing', index=False)
 
-            # Sheet 13: All publishers citing (with percentages)
+            # Sheet 14: All publishers citing (with percentages)
             if citing_stats['all_publishers']:
                 all_citing_publishers_data = []
                 total_articles = safe_convert(citing_stats['n_items'])
@@ -4605,7 +4712,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 all_citing_publishers_df = pd.DataFrame(all_citing_publishers_data)
                 all_citing_publishers_df.to_excel(writer, sheet_name='All_Publishers_Citing', index=False)
 
-            # Sheet 14: Fast metrics (NEW)
+            # Sheet 15: Fast metrics (NEW)
             fast_metrics_data = {
                 'Metric': [
                     'Reference Age (median)', 'Reference Age (mean)',
@@ -4661,7 +4768,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             fast_metrics_df = pd.DataFrame(fast_metrics_data)
             fast_metrics_df.to_excel(writer, sheet_name='Fast_Metrics', index=False)
 
-            # Sheet 15: Top concepts (NEW) - EXPANDED TO 10 TERMS
+            # Sheet 16: Top concepts (NEW) - РАСШИРЕНО ДО 10 ТЕРМИНОВ
             if fast_metrics.get('top_concepts'):
                 top_concepts_data = {
                     'Concept': [safe_convert(concept[0]) for concept in fast_metrics['top_concepts']],
@@ -4670,8 +4777,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 top_concepts_df = pd.DataFrame(top_concepts_data)
                 top_concepts_df.to_excel(writer, sheet_name='Top_Concepts', index=False)
 
-            # === NEW SHEET: Combined title keywords analysis ===
-            # Sheet 16: Combined Title Keywords (NEW)
+            # === НОВЫЙ ЛИСТ: Объединенный анализ ключевых слов в названиях ===
+            # Sheet 17: Combined Title Keywords (NEW)
             if 'title_keywords' in additional_data:
                 keywords_data = additional_data['title_keywords']
                 normalized_keywords = normalize_keywords_data(keywords_data)
@@ -4680,7 +4787,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     keywords_df = pd.DataFrame(normalized_keywords)
                     keywords_df.to_excel(writer, sheet_name='Title_Keywords', index=False)
 
-            # Sheet 17: Citation seasonality
+            # Sheet 18: Citation seasonality
             if 'citation_seasonality' in additional_data:
                 seasonality_data = []
                 citation_seasonality = additional_data['citation_seasonality']
@@ -4716,7 +4823,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     optimal_months_df = pd.DataFrame(optimal_months_data)
                     optimal_months_df.to_excel(writer, sheet_name='Optimal_Publication_Months', index=False)
 
-            # Sheet 18: Potential reviewers
+            # Sheet 19: Potential reviewers
             if 'potential_reviewers' in additional_data:
                 reviewers_data = []
                 potential_reviewers_info = additional_data['potential_reviewers']
@@ -4734,7 +4841,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     reviewers_df = pd.DataFrame(reviewers_data)
                     reviewers_df.to_excel(writer, sheet_name='Potential_Reviewers', index=False)
 
-            # Sheet 19: Special Analysis Metrics (NEW)
+            # Sheet 20: Special Analysis Metrics (NEW)
             if 'special_analysis_metrics' in additional_data:
                 special_metrics = additional_data['special_analysis_metrics']
                 debug_info = special_metrics.get('debug_info', {})
@@ -4805,12 +4912,16 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
 def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, additional_data, is_special_analysis=False):
     """Create visualizations for dashboard"""
     
-    # Create tabs for different visualization types - REMOVED UNNECESSARY TABS
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # Create tabs for different visualization types
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         translation_manager.get_text('tab_main_metrics'), 
         translation_manager.get_text('tab_authors_organizations'), 
         translation_manager.get_text('tab_geography'), 
-        translation_manager.get_text('tab_citations')
+        translation_manager.get_text('tab_citations'),
+        translation_manager.get_text('tab_overlaps'),
+        translation_manager.get_text('tab_citation_timing'),
+        translation_manager.get_text('tab_fast_metrics'),
+        translation_manager.get_text('tab_predictive_insights')
     ])
     
     with tab1:
@@ -5115,6 +5226,280 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
                         st.warning("⚠️ " + translation_manager.get_text('elevated_self_citations_attention'))
                     else:
                         st.error("❌ " + translation_manager.get_text('high_self_citations_problems'))
+    
+    with tab5:
+        st.subheader(translation_manager.get_text('tab_overlaps'))
+        
+        if overlap_details:
+            # Overlap summary statistics
+            total_overlaps = len(overlap_details)
+            articles_with_overlaps = len(set([o['analyzed_doi'] for o in overlap_details]))
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric(translation_manager.get_text('total_overlaps'), total_overlaps)
+            with col2:
+                st.metric(translation_manager.get_text('articles_with_overlaps'), articles_with_overlaps)
+            with col3:
+                avg_overlaps = total_overlaps / articles_with_overlaps if articles_with_overlaps > 0 else 0
+                st.metric(translation_manager.get_text('average_overlaps_per_article'), f"{avg_overlaps:.1f}")
+            
+            # Overlap count distribution
+            overlap_counts = [o['common_authors_count'] + o['common_affiliations_count'] for o in overlap_details]
+            if overlap_counts:
+                fig = px.histogram(
+                    x=overlap_counts,
+                    title=translation_manager.get_text('overlap_count_distribution'),
+                    labels={'x': translation_manager.get_text('overlap_count'), 'y': translation_manager.get_text('frequency')}
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Overlap details table
+            st.subheader(translation_manager.get_text('overlap_details'))
+            overlap_df = pd.DataFrame(overlap_details)
+            st.dataframe(overlap_df[['analyzed_doi', 'citing_doi', 'common_authors_count', 'common_affiliations_count']])
+        else:
+            st.info(translation_manager.get_text('no_overlaps_found'))
+    
+    with tab6:
+        st.subheader(translation_manager.get_text('tab_citation_timing'))
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(translation_manager.get_text('min_days_to_citation'), citation_timing['days_min'])
+        with col2:
+            st.metric(translation_manager.get_text('max_days_to_citation'), citation_timing['days_max'])
+        with col3:
+            st.metric(translation_manager.get_text('average_days'), f"{citation_timing['days_mean']:.1f}")
+        with col4:
+            st.metric(translation_manager.get_text('median_days'), citation_timing['days_median'])
+        
+        # Contextual tooltip for Cited Half-Life
+        if fast_metrics.get('cited_half_life_median'):
+            with st.expander("⏳ " + translation_manager.get_text('cited_half_life_explanation'), expanded=False):
+                chl_info = glossary.get_detailed_info('Cited Half-Life')
+                if chl_info:
+                    st.write(f"**{translation_manager.get_text('current_value')}:** {fast_metrics['cited_half_life_median']} " + translation_manager.get_text('years'))
+                    st.write(f"**{translation_manager.get_text('definition')}:** {chl_info['definition']}")
+                    st.write(f"**{translation_manager.get_text('interpretation')}:** {chl_info['interpretation']}")
+        
+        # First citation details
+        if citation_timing['first_citation_details']:
+            st.subheader(translation_manager.get_text('first_citation_details'))
+            first_citation_df = pd.DataFrame(citation_timing['first_citation_details'])
+            st.dataframe(first_citation_df)
+            
+            # Time to first citation histogram
+            days_data = [d['days_to_first_citation'] for d in citation_timing['first_citation_details']]
+            fig = px.histogram(
+                x=days_data,
+                title=translation_manager.get_text('time_to_first_citation_distribution'),
+                labels={'x': translation_manager.get_text('days_to_first_citation'), 'y': translation_manager.get_text('article_count')}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with tab7:
+        st.subheader(translation_manager.get_text('tab_fast_metrics'))
+        
+        # Main fast metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                translation_manager.get_text('reference_age'), 
+                f"{fast_metrics.get('ref_median_age', 'N/A')} " + translation_manager.get_text('years'),
+                help=glossary.get_tooltip('Reference Age')
+            )
+        with col2:
+            st.metric(
+                translation_manager.get_text('jscr'), 
+                f"{fast_metrics.get('JSCR', 0)}%",
+                help=glossary.get_tooltip('JSCR')
+            )
+        with col3:
+            st.metric(
+                translation_manager.get_text('cited_half_life'), 
+                f"{fast_metrics.get('cited_half_life_median', 'N/A')} " + translation_manager.get_text('years'),
+                help=glossary.get_tooltip('Cited Half-Life')
+            )
+        with col4:
+            st.metric(
+                translation_manager.get_text('fwci'), 
+                fast_metrics.get('FWCI', 0),
+                help=glossary.get_tooltip('FWCI')
+            )
+        
+        col5, col6, col7, col8 = st.columns(4)
+        
+        with col5:
+            st.metric(
+                translation_manager.get_text('citation_velocity'), 
+                fast_metrics.get('citation_velocity', 0),
+                help=glossary.get_tooltip('Citation Velocity')
+            )
+        with col6:
+            st.metric(
+                translation_manager.get_text('oa_impact_premium'), 
+                f"{fast_metrics.get('OA_impact_premium', 0)}%",
+                help=glossary.get_tooltip('OA Impact Premium')
+            )
+        with col7:
+            st.metric(
+                translation_manager.get_text('elite_index'), 
+                f"{fast_metrics.get('elite_index', 0)}%",
+                help=glossary.get_tooltip('Elite Index')
+            )
+        with col8:
+            st.metric(
+                translation_manager.get_text('author_gini'), 
+                fast_metrics.get('author_gini', 0),
+                help=glossary.get_tooltip('Author Gini')
+            )
+        
+        # Detailed fast metrics information
+        st.subheader(translation_manager.get_text('fast_metrics_details'))
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Reference Age distribution
+            if fast_metrics.get('ref_median_age') is not None:
+                st.write(translation_manager.get_text('reference_age_details'))
+                st.write(translation_manager.get_text('reference_age_median').format(value=fast_metrics['ref_median_age']))
+                st.write(translation_manager.get_text('reference_age_mean').format(value=fast_metrics['ref_mean_age']))
+                st.write(translation_manager.get_text('reference_age_percentile').format(value=f"{fast_metrics['ref_ages_25_75'][0]}-{fast_metrics['ref_ages_25_75'][1]}"))
+                st.write(translation_manager.get_text('reference_age_analyzed').format(value=fast_metrics['total_refs_analyzed']))
+                
+                # Contextual tooltip
+                with st.expander("📚 " + translation_manager.get_text('more_about_reference_age'), expanded=False):
+                    ra_info = glossary.get_detailed_info('Reference Age')
+                    if ra_info:
+                        st.write(f"**{translation_manager.get_text('what_does_it_mean')}** {ra_info['interpretation']}")
+                        st.write(f"**{translation_manager.get_text('example')}:** {ra_info['example']}")
+        
+        with col2:
+            # JSCR details
+            st.write(translation_manager.get_text('jscr_details'))
+            st.write(translation_manager.get_text('jscr_self_cites').format(value=fast_metrics.get('self_cites', 0)))
+            st.write(translation_manager.get_text('jscr_total_cites').format(value=fast_metrics.get('total_cites', 0)))
+            st.write(translation_manager.get_text('jscr_percentage').format(value=fast_metrics.get('JSCR', 0)))
+        
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            # Citation Velocity
+            st.write(translation_manager.get_text('citation_velocity_details'))
+            st.write(f"- {translation_manager.get_text('average_citations_per_year')}: {fast_metrics.get('citation_velocity', 0)}")
+            st.write(f"- {translation_manager.get_text('articles_with_data')}: {fast_metrics.get('articles_with_velocity', 0)}")
+        
+        with col4:
+            # OA Impact Premium
+            st.write(translation_manager.get_text('oa_impact_premium_details'))
+            st.write(f"- {translation_manager.get_text('premium')}: {fast_metrics.get('OA_impact_premium', 0)}%")
+            st.write(f"- {translation_manager.get_text('oa_articles')}: {fast_metrics.get('OA_articles', 0)}")
+            st.write(f"- {translation_manager.get_text('non_oa_articles')}: {fast_metrics.get('non_OA_articles', 0)}")
+            
+            # Contextual tooltip
+            if fast_metrics.get('OA_impact_premium', 0) > 0:
+                with st.expander("🔓 " + translation_manager.get_text('open_access_premium'), expanded=False):
+                    st.success("📈 " + translation_manager.get_text('oa_premium_positive'))
+        
+        # Top concepts
+        if fast_metrics.get('top_concepts'):
+            st.subheader(translation_manager.get_text('top_10_thematic_concepts'))
+            concepts_df = pd.DataFrame(fast_metrics['top_concepts'], columns=[translation_manager.get_text('concept'), translation_manager.get_text('mentions')])
+            fig = px.bar(
+                concepts_df,
+                x=translation_manager.get_text('mentions'),
+                y=translation_manager.get_text('concept'),
+                orientation='h',
+                title=translation_manager.get_text('top_thematic_concepts'),
+                color=translation_manager.get_text('mentions')
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Contextual tooltip for DBI
+            if fast_metrics.get('DBI', 0) > 0:
+                with st.expander("🎯 " + translation_manager.get_text('diversity_balance_index'), expanded=False):
+                    dbi_info = glossary.get_detailed_info('DBI')
+                    if dbi_info:
+                        st.write(f"**{translation_manager.get_text('current_dbi_value')}:** {fast_metrics['DBI']}")
+                        st.write(f"**{translation_manager.get_text('interpretation')}:** {dbi_info['interpretation']}")
+                        st.progress(fast_metrics['DBI'])
+
+    with tab8:
+        st.subheader("🔮 Predictive Insights & Recommendations")
+        
+        # Citation seasonality analysis
+        if 'citation_seasonality' in additional_data:
+            st.subheader("Citation Seasonality Analysis")
+            
+            seasonality = additional_data['citation_seasonality']
+            
+            # Citation by month chart
+            months = list(range(1, 13))
+            month_names = [datetime(2023, m, 1).strftime('%B') for m in months]
+            citation_counts = [seasonality['citation_months'].get(m, 0) for m in months]
+            
+            fig = px.line(
+                x=month_names,
+                y=citation_counts,
+                title="Citations by Month",
+                labels={'x': 'Month', 'y': 'Number of Citations'}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Optimal publication months
+            if seasonality['optimal_publication_months']:
+                st.subheader("Recommended Publication Months")
+                
+                for optimal in seasonality['optimal_publication_months']:
+                    citation_month_name = datetime(2023, int(optimal['citation_month']), 1).strftime('%B')
+                    publication_month_name = datetime(2023, int(optimal['recommended_publication_month']), 1).strftime('%B')
+                    
+                    st.info(
+                        f"**Publish in {publication_month_name}** to target high-citation month {citation_month_name} "
+                        f"({optimal['citation_count']} citations)"
+                    )
+        
+        # Potential reviewers analysis
+        if 'potential_reviewers' in additional_data:
+            st.subheader("Potential Reviewer Discovery")
+            
+            reviewers_info = additional_data['potential_reviewers']
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Journal Authors", reviewers_info['total_journal_authors'])
+            with col2:
+                st.metric("Authors with Overlaps", reviewers_info['total_overlap_authors'])
+            with col3:
+                st.metric("Potential Reviewers Found", reviewers_info['total_potential_reviewers'])
+            
+            # Top potential reviewers
+            if reviewers_info['potential_reviewers']:
+                st.subheader("Top Potential Reviewers")
+                
+                top_reviewers = reviewers_info['potential_reviewers'][:10]
+                
+                reviewers_df = pd.DataFrame([
+                    {
+                        'Author': reviewer['author'],
+                        'Citation_Count': reviewer['citation_count'],
+                        'Example_Citing_DOIs': ', '.join(reviewer['citing_dois'][:3]) + ('...' if len(reviewer['citing_dois']) > 3 else '')
+                    }
+                    for reviewer in top_reviewers
+                ])
+                st.dataframe(reviewers_df)
+                
+                st.info(
+                    "💡 **These authors cite your journal but have never published in it. "
+                    "They represent excellent potential reviewers as they are familiar with "
+                    "your journal's content but maintain editorial independence.**"
+                )
 
 # === 19. Main Analysis Function ===
 def analyze_journal(issn, period_str, special_analysis=False):
@@ -5292,15 +5677,15 @@ def analyze_journal(issn, period_str, special_analysis=False):
         state
     )
     
-    # === NEW ANALYSIS: Title keywords ===
+    # === НОВЫЙ АНАЛИЗ: Ключевые слова в названиях ===
     overall_status.text("Analyzing title keywords...")
     title_keywords_analyzer = TitleKeywordsAnalyzer()
     
-    # Extract article titles
+    # Извлекаем названия статей
     analyzed_titles = extract_titles_from_metadata(analyzed_metadata)
     citing_titles = extract_titles_from_metadata(all_citing_metadata)
     
-    # Analyze keywords
+    # Анализируем ключевые слова
     title_keywords = title_keywords_analyzer.analyze_titles(analyzed_titles, citing_titles)
     
     # Combine all additional data
@@ -5309,14 +5694,14 @@ def analyze_journal(issn, period_str, special_analysis=False):
     # Add special analysis metrics FIRST to ensure citing_articles_usage is available
     if state.is_special_analysis and special_analysis_metrics:
         additional_data['special_analysis_metrics'] = special_analysis_metrics
-        # Debug: check citing_articles_usage transfer
+        # Debug: проверяем передачу citing_articles_usage
         debug_info = special_analysis_metrics.get('debug_info', {})
         if 'citing_articles_usage' in debug_info:
             print(f"✅ citing_articles_usage successfully passed to additional_data, size: {len(debug_info['citing_articles_usage'])}")
         else:
             print(f"❌ citing_articles_usage NOT found in special_analysis_metrics")
 
-    # Then add other data
+    # Затем добавляем остальные данные
     additional_data.update({
         'citation_seasonality': citation_seasonality,
         'potential_reviewers': potential_reviewers,
@@ -5492,11 +5877,11 @@ def main():
             elif learned_count >= 2:
                 st.info(translation_manager.get_text('progress_good'))
         
-        # === NEW SECTION: Download README ===
+        # === НОВЫЙ РАЗДЕЛ: Скачать README ===
         st.markdown("---")
         st.header("📄 Documentation")
         
-        # Function to read readme file
+        # Функция для чтения readme файла
         def read_readme_file():
             try:
                 with open('readme.txt', 'r', encoding='utf-8') as file:
@@ -5506,7 +5891,7 @@ def main():
             except Exception as e:
                 return f"Error reading README file: {str(e)}"
         
-        # Create button to download readme.txt
+        # Создаем кнопку для скачивания readme.txt
         readme_content = read_readme_file()
         
         st.download_button(
@@ -5604,13 +5989,17 @@ def main():
             getattr(state, 'is_special_analysis', False) or results.get('special_analysis_metrics', {}).get('is_special_analysis', False)
         )
         
-        # Detailed statistics - REMOVED UNNECESSARY TABS
+        # Detailed statistics
         st.markdown("---")
         st.header("📈 " + translation_manager.get_text('detailed_statistics'))
         
-        tab1, tab2, tab3 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
             translation_manager.get_text('analyzed_articles'), 
-            translation_manager.get_text('citing_works'),
+            translation_manager.get_text('citing_works'), 
+            translation_manager.get_text('comparative_analysis'), 
+            translation_manager.get_text('fast_metrics'),
+            "🔮 Predictive Insights",
+            "🔤 Title Keywords",
             "🎯 Special Analysis"
         ])
         
@@ -5647,8 +6036,175 @@ def main():
                 st.metric(translation_manager.get_text('total_references'), stats['total_refs'])
                 st.metric(translation_manager.get_text('unique_affiliations'), stats['unique_affiliations_count'])
                 st.metric(translation_manager.get_text('unique_countries'), stats['unique_countries_count'])
-
+        
         with tab3:
+            st.subheader(translation_manager.get_text('comparative_analysis'))
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric(
+                    translation_manager.get_text('average_authors_per_article') + " (" + translation_manager.get_text('analyzed') + ")", 
+                    f"{results['analyzed_stats']['auth_mean']:.1f}"
+                )
+                st.metric(
+                    translation_manager.get_text('average_references_per_article') + " (" + translation_manager.get_text('analyzed') + ")", 
+                    f"{results['analyzed_stats']['ref_mean']:.1f}"
+                )
+                
+            with col2:
+                st.metric(
+                    translation_manager.get_text('average_authors_per_article') + " (" + translation_manager.get_text('citing') + ")", 
+                    f"{results['citing_stats']['auth_mean']:.1f}"
+                )
+                st.metric(
+                    translation_manager.get_text('average_references_per_article') + " (" + translation_manager.get_text('citing') + ")", 
+                    f"{results['citing_stats']['ref_mean']:.1f}"
+                )
+        
+        with tab4:
+            st.subheader("🚀 " + translation_manager.get_text('fast_metrics'))
+            fast_metrics = results.get('fast_metrics', {})
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric(translation_manager.get_text('reference_age'), f"{fast_metrics.get('ref_median_age', 'N/A')} " + translation_manager.get_text('years'))
+                st.metric(translation_manager.get_text('jscr'), f"{fast_metrics.get('JSCR', 0)}%")
+                st.metric(translation_manager.get_text('cited_half_life'), f"{fast_metrics.get('cited_half_life_median', 'N/A')} " + translation_manager.get_text('years'))
+                st.metric(translation_manager.get_text('fwci'), fast_metrics.get('FWCI', 0))
+                
+            with col2:
+                st.metric(translation_manager.get_text('citation_velocity'), fast_metrics.get('citation_velocity', 0))
+                st.metric(translation_manager.get_text('oa_impact_premium'), f"{fast_metrics.get('OA_impact_premium', 0)}%")
+                st.metric(translation_manager.get_text('elite_index'), f"{fast_metrics.get('elite_index', 0)}%")
+                st.metric(translation_manager.get_text('author_gini'), fast_metrics.get('author_gini', 0))
+            
+            # Detailed information
+            st.subheader(translation_manager.get_text('fast_metrics_details'))
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write(translation_manager.get_text('reference_age_details'))
+                st.write(translation_manager.get_text('reference_age_median').format(value=fast_metrics.get('ref_median_age', 'N/A')))
+                st.write(translation_manager.get_text('reference_age_mean').format(value=fast_metrics.get('ref_mean_age', 'N/A')))
+                st.write(translation_manager.get_text('reference_age_percentile').format(value=f"{fast_metrics.get('ref_ages_25_75', ['N/A', 'N/A'])[0]}-{fast_metrics.get('ref_ages_25_75', ['N/A', 'N/A'])[1]}"))
+                st.write(translation_manager.get_text('reference_age_analyzed').format(value=fast_metrics.get('total_refs_analyzed', 0)))
+                
+                st.write(translation_manager.get_text('jscr_details'))
+                st.write(translation_manager.get_text('jscr_self_cites').format(value=fast_metrics.get('self_cites', 0)))
+                st.write(translation_manager.get_text('jscr_total_cites').format(value=fast_metrics.get('total_cites', 0)))
+                st.write(translation_manager.get_text('jscr_percentage').format(value=fast_metrics.get('JSCR', 0)))
+            
+            with col2:
+                st.write(translation_manager.get_text('fwci_details'))
+                st.write(translation_manager.get_text('fwci_value').format(value=fast_metrics.get('FWCI', 0)))
+                st.write(translation_manager.get_text('fwci_total_cites').format(value=fast_metrics.get('total_cites', 0)))
+                st.write(translation_manager.get_text('fwci_expected_cites').format(value=fast_metrics.get('expected_cites', 0)))
+                
+                st.write(translation_manager.get_text('dbi_details'))
+                st.write(translation_manager.get_text('dbi_value').format(value=fast_metrics.get('DBI', 0)))
+                st.write(translation_manager.get_text('dbi_unique_concepts').format(value=fast_metrics.get('unique_concepts', 0)))
+                st.write(translation_manager.get_text('dbi_total_mentions').format(value=fast_metrics.get('total_concept_mentions', 0)))
+
+        with tab5:
+            st.subheader("🔮 Predictive Insights & Advanced Analytics")
+            
+            additional_data = results.get('additional_data', {})
+            
+            if additional_data:
+                # Citation seasonality
+                if 'citation_seasonality' in additional_data:
+                    st.subheader("📅 Citation Seasonality")
+                    
+                    seasonality = additional_data['citation_seasonality']
+                    
+                    if seasonality['optimal_publication_months']:
+                        st.write("**Recommended Publication Months:**")
+                        for optimal in seasonality['optimal_publication_months']:
+                            citation_month = datetime(2023, optimal['citation_month'], 1).strftime('%B')
+                            pub_month = datetime(2023, optimal['recommended_publication_month'], 1).strftime('%B')
+                            st.info(f"• Publish in **{pub_month}** to target high-citation month **{citation_month}**")
+                
+                # Potential reviewers
+                if 'potential_reviewers' in additional_data:
+                    st.subheader("👥 Potential Reviewer Discovery")
+                    
+                    reviewers = additional_data['potential_reviewers']
+                    st.write(f"**Found {reviewers['total_potential_reviewers']} potential reviewers** who cite your journal but have never published in it.")
+                    
+                    if reviewers['potential_reviewers']:
+                        st.write("**Top candidates:**")
+                        for i, reviewer in enumerate(reviewers['potential_reviewers'][:5], 1):
+                            st.write(f"{i}. **{reviewer['author']}** - {reviewer['citation_count']} citations")
+            else:
+                st.info("No additional predictive insights available for this analysis.")
+
+        with tab6:
+            st.subheader("🔤 Title Keywords Analysis")
+            
+            additional_data = results.get('additional_data', {})
+            
+            if 'title_keywords' in additional_data:
+                keywords_data = additional_data['title_keywords']
+                
+                st.write(f"**Analyzed articles:** {keywords_data['analyzed']['total_titles']} titles")
+                st.write(f"**Citing articles:** {keywords_data['citing']['total_titles']} titles")
+                
+                # Content words
+                st.subheader("📝 Content Words (Top-10)")
+                content_data = []
+                for i, (word, count) in enumerate(keywords_data['analyzed']['content_words'][:10], 1):
+                    citing_count = next((c for w, c in keywords_data['citing']['content_words'] if w == word), 0)
+                    content_data.append({
+                        'Rank': i,
+                        'Keyword': word,
+                        'Analyzed Articles': count,
+                        'Citing Articles': citing_count
+                    })
+                
+                if content_data:
+                    content_df = pd.DataFrame(content_data)
+                    st.dataframe(content_df)
+                
+                # Compound words
+                if keywords_data['analyzed']['compound_words']:
+                    st.subheader("🔗 Compound Words (Top-10)")
+                    compound_data = []
+                    for i, (word, count) in enumerate(keywords_data['analyzed']['compound_words'][:10], 1):
+                        citing_count = next((c for w, c in keywords_data['citing']['compound_words'] if w == word), 0)
+                        compound_data.append({
+                            'Rank': i,
+                            'Keyword': word,
+                            'Analyzed Articles': count,
+                            'Citing Articles': citing_count
+                        })
+                    
+                    if compound_data:
+                        compound_df = pd.DataFrame(compound_data)
+                        st.dataframe(compound_df)
+                
+                # Scientific stopwords
+                if keywords_data['analyzed']['scientific_words']:
+                    st.subheader("📚 Scientific Stopwords (Top-10)")
+                    scientific_data = []
+                    for i, (word, count) in enumerate(keywords_data['analyzed']['scientific_words'][:10], 1):
+                        citing_count = next((c for w, c in keywords_data['citing']['scientific_words'] if w == word), 0)
+                        scientific_data.append({
+                            'Rank': i,
+                            'Keyword': word,
+                            'Analyzed Articles': count,
+                            'Citing Articles': citing_count
+                        })
+                    
+                    if scientific_data:
+                        scientific_df = pd.DataFrame(scientific_data)
+                        st.dataframe(scientific_df)
+            else:
+                st.info("Title keywords analysis not available for this dataset.")
+
+        with tab7:
             st.subheader("🎯 Special Analysis Metrics")
             
             if state.is_special_analysis and 'special_analysis_metrics' in results:
