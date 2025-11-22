@@ -3993,79 +3993,140 @@ def get_work_by_doi(doi):
         return None
 
 def search_orcid_author(surname, initial, affiliation):
-    """Поиск автора в ORCID API по фамилии, инициалу и аффилиации"""
+    """Поиск автора в ORCID API по фамилии, инициалу и аффилиации - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     try:
-        # Формируем поисковый запрос
-        query_parts = []
-        if surname:
-            query_parts.append(f"family-name:{surname}")
-        if initial:
-            query_parts.append(f"given-names:{initial}*")
-        if affiliation:
-            query_parts.append(f'affiliation-org-name:"{affiliation}"')
-        
-        if not query_parts:
+        if not surname or not surname.strip():
             return None, None, None
+            
+        print(f"🔍 ORCID Search: {surname} {initial}, Affiliation: {affiliation}")
+        
+        # Формируем поисковый запрос
+        query_parts = [f"family-name:{surname.strip()}"]
+        
+        if initial and initial.strip():
+            clean_initial = initial.strip().replace('.', '')
+            if clean_initial:
+                query_parts.append(f"given-names:{clean_initial}*")
+        
+        if affiliation and affiliation.strip():
+            # Используем более широкий поиск по аффилиации
+            query_parts.append(f'affiliation-org-name:"{affiliation.strip()}"')
         
         query = " AND ".join(query_parts)
         url = f"https://pub.orcid.org/v3.0/search/?q={quote(query)}"
+        
         headers = {
-            'Accept': 'application/json'
+            'Accept': 'application/json',
+            'User-Agent': 'JournalAnalysisTool/1.0'
         }
         
-        response = requests.get(url, headers=headers, timeout=10)
+        print(f"📡 ORCID API Request: {url}")
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        
         if response.status_code == 200:
             data = response.json()
-            if data.get('result'):
-                # Берем первый результат
+            num_results = data.get('num-found', 0)
+            print(f"✅ ORCID API Response: {num_results} results found")
+            
+            if num_results > 0:
+                # Берем первый (наиболее релевантный) результат
                 result = data['result'][0]
                 orcid_id = result.get('orcid-identifier', {}).get('path')
                 
                 if orcid_id:
-                    # Для ORCID ID получаем подробную информацию для Scopus и WoS ID
-                    detailed_url = f"https://pub.orcid.org/v3.0/{orcid_id}/person"
-                    detailed_response = requests.get(detailed_url, headers=headers, timeout=10)
+                    print(f"🎯 Found ORCID: {orcid_id}")
                     
-                    scopus_id = None
-                    wos_id = None
-                    
-                    if detailed_response.status_code == 200:
-                        person_data = detailed_response.json()
-                        # Извлекаем внешние идентификаторы
-                        external_ids = person_data.get('external-identifiers', {}).get('external-identifier', [])
-                        for ext_id in external_ids:
-                            ext_id_type = ext_id.get('external-id-type')
-                            ext_id_value = ext_id.get('external-id-value')
-                            if ext_id_type == 'Scopus Author ID' and ext_id_value:
-                                scopus_id = f"https://www.scopus.com/authid/detail.uri?authorId={ext_id_value}"
-                            elif ext_id_type == 'ResearcherID' and ext_id_value:
-                                wos_id = f"http://www.researcherid.com/rid/{ext_id_value}"
-                    
-                    return f"https://orcid.org/{orcid_id}", scopus_id, wos_id
-        
+                    # Получаем подробную информацию для Scopus и WoS ID
+                    orcid_url, scopus_id, wos_id = get_detailed_orcid_info(orcid_id)
+                    return orcid_url, scopus_id, wos_id
+            else:
+                print("❌ No results found in ORCID")
+        else:
+            print(f"❌ ORCID API Error: {response.status_code} - {response.text}")
+            
         return None, None, None
         
     except Exception as e:
-        print(f"Error searching ORCID for {surname} {initial}: {str(e)}")
+        print(f"🚨 Error searching ORCID for {surname} {initial}: {str(e)}")
         return None, None, None
 
+def get_detailed_orcid_info(orcid_id):
+    """Получает подробную информацию из профиля ORCID включая Scopus и WoS ID"""
+    try:
+        orcid_url = f"https://orcid.org/{orcid_id}"
+        scopus_id = None
+        wos_id = None
+        
+        # Получаем person данные
+        person_url = f"https://pub.orcid.org/v3.0/{orcid_id}/person"
+        headers = {'Accept': 'application/json', 'User-Agent': 'JournalAnalysisTool/1.0'}
+        
+        response = requests.get(person_url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            person_data = response.json()
+            
+            # Ищем внешние идентификаторы
+            external_ids = person_data.get('external-identifiers', {}).get('external-identifier', [])
+            
+            for ext_id in external_ids:
+                ext_id_type = ext_id.get('external-id-type', '')
+                ext_id_value = ext_id.get('external-id-value', '')
+                
+                if not ext_id_value:
+                    continue
+                    
+                if ext_id_type.upper() in ['SCOPUS', 'SCOPUS AUTHOR ID']:
+                    scopus_id = f"https://www.scopus.com/authid/detail.uri?authorId={ext_id_value}"
+                    print(f"🔍 Found Scopus ID: {scopus_id}")
+                    
+                elif ext_id_type.upper() in ['RESEARCHERID', 'WOS']:
+                    wos_id = f"https://www.webofscience.com/wos/author/record/{ext_id_value}"
+                    print(f"🔍 Found WoS ID: {wos_id}")
+            
+            # Дополнительная проверка для Researcher URLs
+            researcher_urls = person_data.get('researcher-urls', {}).get('researcher-url', [])
+            for url_data in researcher_urls:
+                url_value = url_data.get('url', {}).get('value', '')
+                if 'scopus' in url_value.lower() and 'authorId' in url_value:
+                    scopus_id = url_value
+                elif 'researcherid' in url_value.lower() or 'webofscience' in url_value.lower():
+                    wos_id = url_value
+        
+        print(f"✅ Detailed info - ORCID: {orcid_url}, Scopus: {scopus_id}, WoS: {wos_id}")
+        return orcid_url, scopus_id, wos_id
+        
+    except Exception as e:
+        print(f"🚨 Error getting detailed ORCID info: {str(e)}")
+        return f"https://orcid.org/{orcid_id}", None, None
+
 def search_orcid_author_cached(surname, initial, affiliation, cache_dict):
-    """Кэшированная версия поиска автора в ORCID"""
-    cache_key = f"{surname}_{initial}_{affiliation}".lower()
+    """Кэшированная версия поиска автора в ORCID - ИСПРАВЛЕННАЯ"""
+    if not surname or not surname.strip():
+        return None, None, None
+        
+    cache_key = f"{surname}_{initial}_{affiliation}".lower().strip()
     
     if cache_key in cache_dict:
+        print(f"📦 Using cached result for {cache_key}")
         return cache_dict[cache_key]
     
+    # Выполняем поиск
     orcid_id, scopus_id, wos_id = search_orcid_author(surname, initial, affiliation)
     
-    # Кэшируем результат
+    # Кэшируем результат (даже если None)
     cache_dict[cache_key] = (orcid_id, scopus_id, wos_id)
     
     return orcid_id, scopus_id, wos_id
 
 def process_author_id_data_parallel(author_list, state):
-    """Обработка данных авторов в параллельном режиме с прогресс-баром"""
+    """Обработка данных авторов в параллельном режиме - ИСПРАВЛЕННАЯ"""
     if not state.include_author_id_data:
+        return []
+    
+    if not author_list:
+        print("❌ No authors to process")
         return []
     
     print(f"🔍 Starting parallel Author ID processing for {len(author_list)} authors")
@@ -4079,13 +4140,28 @@ def process_author_id_data_parallel(author_list, state):
     total_authors = len(author_list)
     
     # Подготавливаем аргументы для параллельной обработки
-    args_list = [(author['surname'], author['initial'], author['affiliation'], state.author_id_cache) 
-                for author in author_list]
+    args_list = []
+    for author in author_list:
+        surname = author.get('surname', '').strip()
+        initial = author.get('initial', '').strip()
+        affiliation = author.get('affiliation', '').strip()
+        
+        if surname:  # Только авторы с фамилией
+            args_list.append((surname, initial, affiliation, state.author_id_cache))
     
-    # Используем 5 рабочих потоков для ORCID API
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(search_orcid_author_cached, args[0], args[1], args[2], args[3]): i 
-                  for i, args in enumerate(args_list)}
+    if not args_list:
+        print("❌ No valid authors to process")
+        author_progress.empty()
+        author_status.empty()
+        return []
+    
+    # Используем меньше рабочих потоков для избежания rate limiting
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {}
+        
+        for i, args in enumerate(args_list):
+            future = executor.submit(search_orcid_author_cached, args[0], args[1], args[2], args[3])
+            futures[future] = i
         
         for i, future in enumerate(as_completed(futures)):
             author_index = futures[future]
@@ -4094,34 +4170,38 @@ def process_author_id_data_parallel(author_list, state):
             try:
                 orcid_id, scopus_id, wos_id = future.result()
                 
-                results.append({
+                result_entry = {
                     'Surname': author_data['surname'],
                     'Initial': author_data['initial'],
                     'Affiliation': author_data['affiliation'],
                     '': '',  # Пустая колонка
-                    'ORCID ID': orcid_id if orcid_id else '',
-                    'Scopus ID': scopus_id if scopus_id else '',
-                    'WoS ID': wos_id if wos_id else ''
-                })
+                    'ORCID ID': orcid_id if orcid_id else 'Not found',
+                    'Scopus ID': scopus_id if scopus_id else 'Not found', 
+                    'WoS ID': wos_id if wos_id else 'Not found'
+                }
                 
+                results.append(result_entry)
                 processed_count += 1
                 
                 # Обновляем прогресс
-                progress = (i + 1) / total_authors
+                progress = (i + 1) / len(args_list)
                 author_progress.progress(progress)
-                author_status.text(f"🔍 Processing Author ID data: {i + 1}/{total_authors}")
+                author_status.text(f"🔍 Processing Author ID data: {i + 1}/{len(args_list)}")
+                
+                # Добавляем небольшую задержку для избежания rate limiting
+                time.sleep(0.5)
                 
             except Exception as e:
                 print(f"⚠️ Error processing author {author_data['surname']} {author_data['initial']}: {str(e)}")
-                # Добавляем запись даже при ошибке
+                # Добавляем запись с ошибкой
                 results.append({
                     'Surname': author_data['surname'],
                     'Initial': author_data['initial'],
                     'Affiliation': author_data['affiliation'],
-                    '': '',  # Пустая колонка
-                    'ORCID ID': '',
-                    'Scopus ID': '',
-                    'WoS ID': ''
+                    '': '',
+                    'ORCID ID': f'Error: {str(e)}',
+                    'Scopus ID': 'Error',
+                    'WoS ID': 'Error'
                 })
                 processed_count += 1
     
@@ -4129,6 +4209,14 @@ def process_author_id_data_parallel(author_list, state):
     author_status.empty()
     
     print(f"✅ Author ID processing completed: {processed_count}/{total_authors} authors processed")
+    
+    # Логируем статистику
+    found_orcid = sum(1 for r in results if r['ORCID ID'] not in ['Not found', 'Error'])
+    found_scopus = sum(1 for r in results if r['Scopus ID'] not in ['Not found', 'Error']) 
+    found_wos = sum(1 for r in results if r['WoS ID'] not in ['Not found', 'Error'])
+    
+    print(f"📊 Results - ORCID: {found_orcid}, Scopus: {found_scopus}, WoS: {found_wos}")
+    
     return results
 
 def extract_unique_authors_from_metadata(analyzed_metadata, citing_metadata, state):
@@ -5882,3 +5970,4 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
