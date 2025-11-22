@@ -5634,12 +5634,6 @@ def main():
             disabled=special_analysis  # Теперь это работает правильно!
         )
         
-        # Показываем сообщение только если Special Analysis активен
-        if special_analysis:
-            st.info("🔬 Special Analysis Mode: Using fixed period for CiteScore & Impact Factor calculation")
-            if period:
-                st.warning("The specified period will be ignored - using fixed calculation windows instead.")
-        
         st.markdown("---")  # Разделитель между основными параметрами и опциями
         
         # NEW: Include ROR data checkbox
@@ -6025,6 +6019,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
