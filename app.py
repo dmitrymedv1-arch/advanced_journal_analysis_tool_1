@@ -3859,80 +3859,119 @@ def search_author_identifiers_cached(author_name, affiliation, cache_dict):
     
     return orcid_url, scopus_url, wos_url
     
+def get_work_by_doi(doi):
+    """Получает информацию о научной работе по DOI из OpenAlex API"""
+    if not doi:
+        return None
+    url = f"https://api.openalex.org/works/doi:{doi}"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except:
+        return None
+
+def extract_authors_and_affiliations(work_data):
+    """Извлекает список авторов и их аффилиаций из данных работы"""
+    if not work_data or 'authorships' not in work_data:
+        return []
+    
+    authors_info = []
+    for authorship in work_data['authorships']:
+        author_data = authorship.get('author', {})
+        institution_data = authorship.get('institutions', [])
+        
+        # Имя автора
+        author_name = author_data.get('display_name', 'Unknown Author')
+        
+        # Аффилиация: берем первую учреждение
+        affiliation = 'Unknown Affiliation'
+        if institution_data:
+            first_inst = institution_data[0]
+            affiliation = first_inst.get('display_name', 'Unknown Institution')
+        
+        authors_info.append({
+            'author': author_name,
+            'affiliation': affiliation
+        })
+    
+    return authors_info
+
 def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles, analyzed_data, citing_data):
     """Создает объединенный лист авторов анализируемых и цитирующих статей с правильными аффилиациями"""
+    
+    # Кэш для данных работ по DOI
+    work_data_cache = {}
+    
+    def get_cached_work_data(doi):
+        if not doi:
+            return None
+        if doi in work_data_cache:
+            return work_data_cache[doi]
+        work_data = get_work_by_doi(doi)
+        work_data_cache[doi] = work_data
+        return work_data
     
     # Создаем словарь для хранения авторов и их аффилиаций
     author_affiliations = defaultdict(set)
     author_counts = Counter()
     
-    # Обрабатываем анализируемые статьи - используем авторов из Crossref для правильного формата
+    # Обрабатываем анализируемые статьи
+    print("🔍 Processing analyzed articles for authors and affiliations...")
+    analyzed_count = 0
     for meta in analyzed_data:
         if not meta:
             continue
         
-        # Берем авторов из Crossref (правильный формат "Фамилия Инициалы")
+        doi = None
         cr = meta.get('crossref')
-        authors_from_cr = []
-        if cr and cr.get('author'):
-            for auth in cr.get('author', []):
-                family_name = auth.get('family', '').strip()
-                given_name = auth.get('given', '').strip()
-                if family_name:
-                    # Форматируем как "Фамилия Инициалы"
-                    initials = '.'.join([c + '.' for c in given_name if c.isupper()]) if given_name else ''
-                    if initials:
-                        author_name = f"{family_name} {initials}".strip()
-                    else:
-                        author_name = family_name
-                    authors_from_cr.append(author_name)
+        if cr and cr.get('DOI'):
+            doi = cr.get('DOI')
         
-        # Берем аффилиации из OpenAlex
-        oa = meta.get('openalex')
-        affiliations_list = []
-        if oa:
-            _, affiliations_list, _ = extract_affiliations_and_countries(oa)
-        
-        # Связываем авторов с аффилиациями
-        for author in authors_from_cr:
-            author_counts[author] += 1
-            for affiliation in affiliations_list:
-                if affiliation and affiliation != "Unknown":
-                    author_affiliations[author].add(affiliation)
+        if doi:
+            work_data = get_cached_work_data(doi)
+            if work_data:
+                authors_info = extract_authors_and_affiliations(work_data)
+                for author_info in authors_info:
+                    author_name = author_info['author']
+                    affiliation = author_info['affiliation']
+                    
+                    author_counts[author_name] += 1
+                    if affiliation and affiliation != 'Unknown Affiliation':
+                        author_affiliations[author_name].add(affiliation)
+                analyzed_count += 1
     
-    # Обрабатываем цитирующие статьи аналогично
+    print(f"✅ Processed {analyzed_count} analyzed articles")
+    
+    # Обрабатываем цитирующие статьи
+    print("🔍 Processing citing articles for authors and affiliations...")
+    citing_count = 0
     for meta in citing_data:
         if not meta:
             continue
         
-        # Берем авторов из Crossref (правильный формат "Фамилия Инициалы")
-        cr = meta.get('crossref')
-        authors_from_cr = []
-        if cr and cr.get('author'):
-            for auth in cr.get('author', []):
-                family_name = auth.get('family', '').strip()
-                given_name = auth.get('given', '').strip()
-                if family_name:
-                    # Форматируем как "Фамилия Инициалы"
-                    initials = '.'.join([c + '.' for c in given_name if c.isupper()]) if given_name else ''
-                    if initials:
-                        author_name = f"{family_name} {initials}".strip()
-                    else:
-                        author_name = family_name
-                    authors_from_cr.append(author_name)
+        doi = meta.get('doi')
+        if not doi:
+            cr = meta.get('crossref')
+            if cr and cr.get('DOI'):
+                doi = cr.get('DOI')
         
-        # Берем аффилиации из OpenAlex
-        oa = meta.get('openalex')
-        affiliations_list = []
-        if oa:
-            _, affiliations_list, _ = extract_affiliations_and_countries(oa)
-        
-        # Связываем авторов с аффилиациями
-        for author in authors_from_cr:
-            author_counts[author] += 1
-            for affiliation in affiliations_list:
-                if affiliation and affiliation != "Unknown":
-                    author_affiliations[author].add(affiliation)
+        if doi:
+            work_data = get_cached_work_data(doi)
+            if work_data:
+                authors_info = extract_authors_and_affiliations(work_data)
+                for author_info in authors_info:
+                    author_name = author_info['author']
+                    affiliation = author_info['affiliation']
+                    
+                    author_counts[author_name] += 1
+                    if affiliation and affiliation != 'Unknown Affiliation':
+                        author_affiliations[author_name].add(affiliation)
+                citing_count += 1
+    
+    print(f"✅ Processed {citing_count} citing articles")
+    print(f"📊 Total unique authors found: {len(author_counts)}")
+    print(f"📊 Authors with affiliations: {len([a for a, affs in author_affiliations.items() if affs])}")
     
     # Создаем объединенные данные
     combined_data = []
@@ -3945,7 +3984,8 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
     analyzed_authors_dict = dict(analyzed_authors_data)
     citing_authors_dict = dict(citing_authors_data)
     
-    for author in all_authors:
+    print("🔍 Creating combined authors data...")
+    for i, author in enumerate(all_authors):
         analyzed_count = analyzed_authors_dict.get(author, 0)
         citing_count = citing_authors_dict.get(author, 0)
         total_publications = author_counts[author]
@@ -3954,7 +3994,7 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         affiliations = author_affiliations.get(author, set())
         primary_affiliation = "Unknown"
         if affiliations:
-            # Выбираем первую аффилиацию
+            # Выбираем первую аффилиацию (можно улучшить логику выбора основной)
             primary_affiliation = sorted(affiliations)[0]
         
         # Рассчитываем проценты
@@ -4003,9 +4043,15 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
             'Scopus ID': scopus_url,
             'WoS ID': wos_url
         })
+        
+        # Прогресс каждые 100 авторов
+        if (i + 1) % 100 == 0:
+            print(f"✅ Processed {i + 1}/{len(all_authors)} authors")
     
     # Сортируем по общему количеству публикаций (убывание)
     combined_data.sort(key=lambda x: x['Total'], reverse=True)
+    
+    print(f"🎯 Combined authors sheet created with {len(combined_data)} authors")
     
     return combined_data
 
@@ -5721,6 +5767,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
