@@ -1089,27 +1089,33 @@ class RORService:
         
         return score
     
-    def _extract_ror_info(self, item):
+     def _extract_ror_info(self, item):
         """Extract ROR information from API response"""
         if not item:
             return None, None
         
         try:
             # Extract ROR ID and Colab link
-            ror_id = item['id'].split('/')[-1]
+            ror_id = item.get('id', '').split('/')[-1]
+            if not ror_id:
+                return None, None
+                
             colab_url = f"https://colab.ws/organizations/{ror_id}"
             
-            # Extract website
+            # Extract website - улучшенная логика
             website = None
-            links = item.get('links', []) or []
+            links = item.get('links', [])
             
+            # Проверяем разные форматы ссылок
             for link in links:
-                if isinstance(link, dict):
-                    url = link.get('value') or link.get('url')
+                if isinstance(link, str):
+                    url = link.strip()
+                elif isinstance(link, dict):
+                    url = link.get('value') or link.get('url') or link.get('link')
                 else:
-                    url = str(link)
-                
-                if url and isinstance(url, str):
+                    continue
+                    
+                if url and isinstance(url, str) and len(url) > 5:
                     url = url.strip()
                     if url.startswith(('http://', 'https://')):
                         website = url
@@ -1118,10 +1124,11 @@ class RORService:
                         website = 'https://' + url
                         break
             
+            print(f"✅ ROR extracted: {colab_url}, website: {website}")
             return colab_url, website
             
         except Exception as e:
-            print(f"Error extracting ROR info: {str(e)}")
+            print(f"❌ Error extracting ROR info: {str(e)}")
             return None, None
     
     def get_stats(self):
@@ -6301,5 +6308,6 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
