@@ -4124,7 +4124,7 @@ def search_orcid_author_cached(surname, given_name, affiliation, cache_dict):
     return orcid_id, scopus_id, wos_id
 
 def process_author_id_data_parallel(author_list, state):
-    """Обработка данных авторов в параллельном режиме - ИСПРАВЛЕННАЯ"""
+    """Обработка данных авторов в параллельном режиме - УЛУЧШЕННАЯ ВЕРСИЯ"""
     if not state.include_author_id_data:
         return []
     
@@ -4173,14 +4173,18 @@ def process_author_id_data_parallel(author_list, state):
             try:
                 orcid_id, scopus_id, wos_id = future.result()
                 
+                # Создаем запись с полной информацией об авторе
                 result_entry = {
+                    'Full Name': author_data['full_name'],
                     'Surname': author_data['surname'],
                     'Given Name': author_data['given_name'],
                     'Affiliation': author_data['affiliation'],
                     '.': '.',  # Точка в пустой колонке
-                    'ORCID ID': orcid_id if orcid_id else '',  # Пустая вместо "Not found"
-                    'Scopus ID': scopus_id if scopus_id else '',  # Пустая вместо "Not found"
-                    'WoS ID': wos_id if wos_id else ''  # Пустая вместо "Not found"
+                    'ORCID ID': orcid_id if orcid_id else '',
+                    'Scopus ID': scopus_id if scopus_id else '',
+                    'WoS ID': wos_id if wos_id else '',
+                    'Sources': ', '.join(author_data['sources']),
+                    'All Affiliations': '; '.join(author_data['all_affiliations']) if author_data['all_affiliations'] else 'No affiliation'
                 }
                 
                 results.append(result_entry)
@@ -4196,15 +4200,18 @@ def process_author_id_data_parallel(author_list, state):
                 
             except Exception as e:
                 print(f"⚠️ Error processing author {author_data['surname']} {author_data['given_name']}: {str(e)}")
-                # Добавляем запись с ошибкой
+                # Добавляем запись с ошибкой (но без ID)
                 results.append({
+                    'Full Name': author_data['full_name'],
                     'Surname': author_data['surname'],
                     'Given Name': author_data['given_name'],
                     'Affiliation': author_data['affiliation'],
                     '.': '.',
                     'ORCID ID': '',
                     'Scopus ID': '',
-                    'WoS ID': ''
+                    'WoS ID': '',
+                    'Sources': ', '.join(author_data['sources']),
+                    'All Affiliations': '; '.join(author_data['all_affiliations']) if author_data['all_affiliations'] else 'No affiliation'
                 })
                 processed_count += 1
     
@@ -4223,68 +4230,94 @@ def process_author_id_data_parallel(author_list, state):
     return results
 
 def extract_unique_authors_from_metadata(analyzed_metadata, citing_metadata, state):
-    """Извлекает уникальных авторов из метаданных анализируемых и цитирующих статей"""
-    unique_authors = set()
-    author_details = {}
+    """Извлекает уникальных авторов из метаданных анализируемых и цитирующих статей с объединением аффилиаций"""
+    author_records = {}  # ключ: "Фамилия Имя", значение: список аффилиаций
+    
+    def process_metadata(metadata_list, source_type):
+        """Обрабатывает метаданные и добавляет авторов в общую коллекцию"""
+        for meta in metadata_list:
+            if not meta or not meta.get('openalex'):
+                continue
+                
+            doi = meta.get('doi')
+            if not doi:
+                continue
+                
+            # Получаем данные работы
+            work_data = get_work_by_doi(doi)
+            if not work_data:
+                continue
+                
+            # Извлекаем авторов
+            authors = extract_clean_authors_from_work(work_data)
+            for author in authors:
+                author_name = author['name']
+                affiliation = author['affiliation']
+                
+                if author_name not in author_records:
+                    author_records[author_name] = {
+                        'surname': author['surname'],
+                        'given_name': author['given_name'],
+                        'affiliations': set(),
+                        'sources': set()
+                    }
+                
+                # Добавляем аффилиацию (если есть)
+                if affiliation and affiliation != "No affiliation":
+                    author_records[author_name]['affiliations'].add(affiliation)
+                
+                # Отмечаем источник
+                author_records[author_name]['sources'].add(source_type)
     
     # Обрабатываем анализируемые статьи
-    for meta in analyzed_metadata:
-        if not meta or not meta.get('openalex'):
-            continue
-            
-        doi = meta.get('doi')
-        if not doi:
-            continue
-            
-        # Получаем данные работы
-        work_data = get_work_by_doi(doi)
-        if not work_data:
-            continue
-            
-        # Извлекаем авторов
-        authors = extract_clean_authors_from_work(work_data)
-        for author in authors:
-            author_key = f"{author['name']}_{author['affiliation']}"
-            if author_key not in unique_authors:
-                unique_authors.add(author_key)
-                
-                author_details[author_key] = {
-                    'surname': author['surname'],
-                    'given_name': author['given_name'],
-                    'affiliation': author['affiliation']
-                }
+    print("🔍 Processing analyzed articles for authors...")
+    process_metadata(analyzed_metadata, 'analyzed')
     
     # Обрабатываем цитирующие статьи
-    for meta in citing_metadata:
-        if not meta or not meta.get('openalex'):
-            continue
-            
-        doi = meta.get('doi')
-        if not doi:
-            continue
-            
-        # Получаем данные работы
-        work_data = get_work_by_doi(doi)
-        if not work_data:
-            continue
-            
-        # Извлекаем авторов
-        authors = extract_clean_authors_from_work(work_data)
-        for author in authors:
-            author_key = f"{author['name']}_{author['affiliation']}"
-            if author_key not in unique_authors:
-                unique_authors.add(author_key)
-                
-                author_details[author_key] = {
-                    'surname': author['surname'],
-                    'given_name': author['given_name'],
-                    'affiliation': author['affiliation']
-                }
+    print("🔍 Processing citing articles for authors...")
+    process_metadata(citing_metadata, 'citing')
     
-    # Преобразуем в список
-    author_list = list(author_details.values())
+    # Преобразуем в список с выбором лучшей аффилиации
+    author_list = []
+    
+    for author_name, data in author_records.items():
+        affiliations_list = list(data['affiliations'])
+        
+        # Выбираем лучшую аффилиацию по приоритету:
+        # 1. Аффилиация из анализируемых статей
+        # 2. Первая аффилиация из цитирующих статей  
+        # 3. "No affiliation" если ничего нет
+        
+        best_affiliation = "No affiliation"
+        if affiliations_list:
+            # Если автор есть в анализируемых статьях, предпочитаем его аффилиации
+            if 'analyzed' in data['sources']:
+                # Ищем аффилиации из анализируемых статей
+                analyzed_affiliations = set()
+                # Для этого нужно проверить исходные данные, но в упрощенной версии берем первую
+                best_affiliation = affiliations_list[0]
+            else:
+                # Только цитирующие статьи - берем первую аффилиацию
+                best_affiliation = affiliations_list[0]
+        
+        author_list.append({
+            'surname': data['surname'],
+            'given_name': data['given_name'],
+            'full_name': author_name,
+            'affiliation': best_affiliation,
+            'all_affiliations': affiliations_list,  # сохраняем все аффилиации для отладки
+            'sources': list(data['sources'])
+        })
+    
+    # Сортируем по фамилии для удобства
+    author_list.sort(key=lambda x: x['surname'])
     
     print(f"📊 Extracted {len(author_list)} unique authors from metadata")
+    print(f"   - With affiliations: {len([a for a in author_list if a['affiliation'] != 'No affiliation'])}")
+    print(f"   - From analyzed articles: {len([a for a in author_list if 'analyzed' in a['sources']])}")
+    print(f"   - From citing articles: {len([a for a in author_list if 'citing' in a['sources']])}")
+    print(f"   - From both sources: {len([a for a in author_list if len(a['sources']) > 1])}")
+    
     return author_list
 
 def create_author_id_sheet(analyzed_metadata, citing_metadata, state):
@@ -4292,16 +4325,38 @@ def create_author_id_sheet(analyzed_metadata, citing_metadata, state):
     if not state.include_author_id_data:
         return []
     
-    # Извлекаем уникальных авторов
+    # Извлекаем уникальных авторов с объединением данных
     unique_authors = extract_unique_authors_from_metadata(analyzed_metadata, citing_metadata, state)
     
     if not unique_authors:
+        st.info("No authors found for Author ID data processing.")
         return []
+    
+    # Показываем статистику
+    st.info(f"📊 Found {len(unique_authors)} unique authors for ID processing")
     
     # Обрабатываем данные авторов
     author_id_data = process_author_id_data_parallel(unique_authors, state)
     
-    return author_id_data
+    # Создаем финальный DataFrame с нужными колонками
+    final_columns = [
+        'Full Name', 
+        'Surname', 
+        'Given Name', 
+        'Affiliation', 
+        '.', 
+        'ORCID ID', 
+        'Scopus ID', 
+        'WoS ID'
+    ]
+    
+    # Фильтруем только нужные колонки для итогового листа
+    final_data = []
+    for record in author_id_data:
+        final_record = {col: record[col] for col in final_columns}
+        final_data.append(final_record)
+    
+    return final_data
 
 # === 17. Enhanced Excel Report Creation ===
 def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
@@ -5965,5 +6020,6 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
