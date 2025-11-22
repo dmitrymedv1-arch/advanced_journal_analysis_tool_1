@@ -5637,7 +5637,7 @@ def main():
         include_author_id_data = st.checkbox(
             "👤 Include Author ID data", 
             value=False,
-            help="Include Author ID data (ORCID, Scopus ID, WoS ID) in Author_ID_data sheet (may significantly increase processing time)"
+            help="Include Author ID data (ORCID, Scopus ID, WoS ID) in Author_ID_data sheet (may significantly increase processing time; please do not use for a large number of papers/citations)"
         )
         
         # Period input - disabled when Special Analysis is active
@@ -6020,6 +6020,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
