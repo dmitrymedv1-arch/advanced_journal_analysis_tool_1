@@ -3859,8 +3859,8 @@ def search_author_identifiers_cached(author_name, affiliation, cache_dict):
     
     return orcid_url, scopus_url, wos_url
     
-def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles):
-    """Создает объединенный лист авторов анализируемых и цитирующих статей"""
+def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles, analyzed_metadata, citing_metadata):
+    """Создает объединенный лист авторов анализируемых и цитирующих статей с правильными аффилиациями"""
     
     # Нормализуем имена авторов и объединяем счетчики
     def normalize_and_aggregate(authors_list):
@@ -3873,6 +3873,35 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
     analyzed_authors = normalize_and_aggregate(analyzed_authors_data)
     citing_authors = normalize_and_aggregate(citing_authors_data)
     
+    # Создаем словарь для хранения аффилиаций авторов
+    author_affiliations = defaultdict(set)
+    
+    # Извлекаем аффилиации из анализируемых статей
+    for meta in analyzed_metadata:
+        if not meta:
+            continue
+        oa = meta.get('openalex')
+        if oa:
+            authors_list, affiliations_list, _ = extract_affiliations_and_countries(oa)
+            for author in authors_list:
+                normalized_author = normalize_author_name(author)
+                for affiliation in affiliations_list:
+                    if affiliation:  # Добавляем только непустые аффилиации
+                        author_affiliations[normalized_author].add(affiliation)
+    
+    # Извлекаем аффилиации из цитирующих статей
+    for meta in citing_metadata:
+        if not meta:
+            continue
+        oa = meta.get('openalex')
+        if oa:
+            authors_list, affiliations_list, _ = extract_affiliations_and_countries(oa)
+            for author in authors_list:
+                normalized_author = normalize_author_name(author)
+                for affiliation in affiliations_list:
+                    if affiliation:  # Добавляем только непустые аффилиации
+                        author_affiliations[normalized_author].add(affiliation)
+    
     combined_data = []
     all_authors = set(analyzed_authors.keys()) | set(citing_authors.keys())
     
@@ -3883,6 +3912,11 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         analyzed_count = analyzed_authors.get(author, 0)
         citing_count = citing_authors.get(author, 0)
         total_publications = analyzed_count + citing_count
+        
+        # Получаем аффилиации автора
+        affiliations = author_affiliations.get(author, set())
+        primary_affiliation = next(iter(affiliations), "Unknown") if affiliations else "Unknown"
+        all_affiliations_str = "; ".join(sorted(affiliations)) if affiliations else "Unknown"
         
         # Рассчитываем проценты
         analyzed_pct = (analyzed_count / analyzed_total_articles * 100) if analyzed_total_articles > 0 else 0
@@ -3911,16 +3945,13 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         else:
             activity_balance = "Citing-Heavy"
         
-        # Ищем аффилиацию автора (упрощенный подход)
-        affiliation = "Unknown"
-        # В реальной реализации здесь нужно извлекать аффилиацию из данных статей
-        
-        # Ищем идентификаторы автора
-        orcid_url, scopus_url, wos_url = search_author_identifiers_cached(author, affiliation, author_identifiers_cache)
+        # Ищем идентификаторы автора (используем основную аффилиацию для поиска)
+        orcid_url, scopus_url, wos_url = search_author_identifiers_cached(author, primary_affiliation, author_identifiers_cache)
         
         combined_data.append({
             'Author': author,
-            'Affiliation': affiliation,
+            'Affiliation': primary_affiliation,
+            'All_Affiliations': all_affiliations_str,
             'Total': total_publications,
             'Status': author_status,
             'Analyzed_Count': analyzed_count,
@@ -5650,4 +5681,5 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
