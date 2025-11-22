@@ -3934,7 +3934,7 @@ def create_combined_countries_sheet(analyzed_countries_data, citing_countries_da
 # === NEW FUNCTIONS FOR AUTHOR ID DATA ===
 
 def format_author_name_from_raw(raw_name):
-    """Из любого raw_author_name делает: Sabirov D.  или  Agliullin M."""
+    """Из любого raw_author_name делает полное имя: Sabirov Denis или Agliullin Marat"""
     if not raw_name:
         return "Unknown Author"
     
@@ -3948,17 +3948,13 @@ def format_author_name_from_raw(raw_name):
     # Фамилия — всегда последняя часть
     family = parts[-1]
     
-    # Ищем первую букву имени (отбрасываем всё после неё, включая вторые инициалы)
-    for part in parts[:-1]:
-        clean = re.sub(r'[^A-Za-zА-яЁё]', '', part)
-        if clean and clean[0].isalpha():
-            initial = clean[0].upper() + "."
-            return f"{family} {initial}"
+    # Имя — все части кроме последней, объединяем пробелами
+    given_names = ' '.join(parts[:-1])
     
-    return family  # если инициалов вообще нет
+    return f"{family} {given_names}"
 
 def extract_clean_authors_from_work(data):
-    """Извлекает авторов из данных OpenAlex в формате Фамилия И. с аффилиацией"""
+    """Извлекает авторов из данных OpenAlex в формате Фамилия Имя с аффилиацией"""
     authors = []
     for auth in data.get('authorships', []):
         raw_name = auth.get('raw_author_name')
@@ -3974,8 +3970,15 @@ def extract_clean_authors_from_work(data):
                 aff = inst['display_name']
                 break  # берём только первую
         
+        # Разделяем имя на фамилию и имя для поиска
+        name_parts = name.split()
+        surname = name_parts[0] if name_parts else ""
+        given_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ""
+        
         authors.append({
             'name': name,
+            'surname': surname,
+            'given_name': given_name,
             'affiliation': aff
         })
     
@@ -3992,21 +3995,21 @@ def get_work_by_doi(doi):
     except:
         return None
 
-def search_orcid_author(surname, initial, affiliation):
-    """Поиск автора в ORCID API по фамилии, инициалу и аффилиации - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+def search_orcid_author(surname, given_name, affiliation):
+    """Поиск автора в ORCID API по фамилии, имени и аффилиации - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     try:
         if not surname or not surname.strip():
             return None, None, None
             
-        print(f"🔍 ORCID Search: {surname} {initial}, Affiliation: {affiliation}")
+        print(f"🔍 ORCID Search: {surname} {given_name}, Affiliation: {affiliation}")
         
         # Формируем поисковый запрос
         query_parts = [f"family-name:{surname.strip()}"]
         
-        if initial and initial.strip():
-            clean_initial = initial.strip().replace('.', '')
-            if clean_initial:
-                query_parts.append(f"given-names:{clean_initial}*")
+        if given_name and given_name.strip():
+            # Используем полное имя вместо инициала
+            clean_given_name = given_name.strip()
+            query_parts.append(f"given-names:{clean_given_name}")
         
         if affiliation and affiliation.strip():
             # Используем более широкий поиск по аффилиации
@@ -4048,7 +4051,7 @@ def search_orcid_author(surname, initial, affiliation):
         return None, None, None
         
     except Exception as e:
-        print(f"🚨 Error searching ORCID for {surname} {initial}: {str(e)}")
+        print(f"🚨 Error searching ORCID for {surname} {given_name}: {str(e)}")
         return None, None, None
 
 def get_detailed_orcid_info(orcid_id):
@@ -4101,19 +4104,19 @@ def get_detailed_orcid_info(orcid_id):
         print(f"🚨 Error getting detailed ORCID info: {str(e)}")
         return f"https://orcid.org/{orcid_id}", None, None
 
-def search_orcid_author_cached(surname, initial, affiliation, cache_dict):
+def search_orcid_author_cached(surname, given_name, affiliation, cache_dict):
     """Кэшированная версия поиска автора в ORCID - ИСПРАВЛЕННАЯ"""
     if not surname or not surname.strip():
         return None, None, None
         
-    cache_key = f"{surname}_{initial}_{affiliation}".lower().strip()
+    cache_key = f"{surname}_{given_name}_{affiliation}".lower().strip()
     
     if cache_key in cache_dict:
         print(f"📦 Using cached result for {cache_key}")
         return cache_dict[cache_key]
     
     # Выполняем поиск
-    orcid_id, scopus_id, wos_id = search_orcid_author(surname, initial, affiliation)
+    orcid_id, scopus_id, wos_id = search_orcid_author(surname, given_name, affiliation)
     
     # Кэшируем результат (даже если None)
     cache_dict[cache_key] = (orcid_id, scopus_id, wos_id)
@@ -4143,11 +4146,11 @@ def process_author_id_data_parallel(author_list, state):
     args_list = []
     for author in author_list:
         surname = author.get('surname', '').strip()
-        initial = author.get('initial', '').strip()
+        given_name = author.get('given_name', '').strip()
         affiliation = author.get('affiliation', '').strip()
         
         if surname:  # Только авторы с фамилией
-            args_list.append((surname, initial, affiliation, state.author_id_cache))
+            args_list.append((surname, given_name, affiliation, state.author_id_cache))
     
     if not args_list:
         print("❌ No valid authors to process")
@@ -4172,12 +4175,12 @@ def process_author_id_data_parallel(author_list, state):
                 
                 result_entry = {
                     'Surname': author_data['surname'],
-                    'Initial': author_data['initial'],
+                    'Given Name': author_data['given_name'],
                     'Affiliation': author_data['affiliation'],
-                    '': '',  # Пустая колонка
-                    'ORCID ID': orcid_id if orcid_id else 'Not found',
-                    'Scopus ID': scopus_id if scopus_id else 'Not found', 
-                    'WoS ID': wos_id if wos_id else 'Not found'
+                    '.': '.',  # Точка в пустой колонке
+                    'ORCID ID': orcid_id if orcid_id else '',  # Пустая вместо "Not found"
+                    'Scopus ID': scopus_id if scopus_id else '',  # Пустая вместо "Not found"
+                    'WoS ID': wos_id if wos_id else ''  # Пустая вместо "Not found"
                 }
                 
                 results.append(result_entry)
@@ -4192,16 +4195,16 @@ def process_author_id_data_parallel(author_list, state):
                 time.sleep(0.5)
                 
             except Exception as e:
-                print(f"⚠️ Error processing author {author_data['surname']} {author_data['initial']}: {str(e)}")
+                print(f"⚠️ Error processing author {author_data['surname']} {author_data['given_name']}: {str(e)}")
                 # Добавляем запись с ошибкой
                 results.append({
                     'Surname': author_data['surname'],
-                    'Initial': author_data['initial'],
+                    'Given Name': author_data['given_name'],
                     'Affiliation': author_data['affiliation'],
-                    '': '',
-                    'ORCID ID': f'Error: {str(e)}',
-                    'Scopus ID': 'Error',
-                    'WoS ID': 'Error'
+                    '.': '.',
+                    'ORCID ID': '',
+                    'Scopus ID': '',
+                    'WoS ID': ''
                 })
                 processed_count += 1
     
@@ -4211,9 +4214,9 @@ def process_author_id_data_parallel(author_list, state):
     print(f"✅ Author ID processing completed: {processed_count}/{total_authors} authors processed")
     
     # Логируем статистику
-    found_orcid = sum(1 for r in results if r['ORCID ID'] not in ['Not found', 'Error'])
-    found_scopus = sum(1 for r in results if r['Scopus ID'] not in ['Not found', 'Error']) 
-    found_wos = sum(1 for r in results if r['WoS ID'] not in ['Not found', 'Error'])
+    found_orcid = sum(1 for r in results if r['ORCID ID'] != '')
+    found_scopus = sum(1 for r in results if r['Scopus ID'] != '') 
+    found_wos = sum(1 for r in results if r['WoS ID'] != '')
     
     print(f"📊 Results - ORCID: {found_orcid}, Scopus: {found_scopus}, WoS: {found_wos}")
     
@@ -4244,14 +4247,10 @@ def extract_unique_authors_from_metadata(analyzed_metadata, citing_metadata, sta
             author_key = f"{author['name']}_{author['affiliation']}"
             if author_key not in unique_authors:
                 unique_authors.add(author_key)
-                # Разделяем имя на фамилию и инициал
-                name_parts = author['name'].split()
-                surname = name_parts[0] if name_parts else ""
-                initial = name_parts[1] if len(name_parts) > 1 else ""
                 
                 author_details[author_key] = {
-                    'surname': surname,
-                    'initial': initial,
+                    'surname': author['surname'],
+                    'given_name': author['given_name'],
                     'affiliation': author['affiliation']
                 }
     
@@ -4275,14 +4274,10 @@ def extract_unique_authors_from_metadata(analyzed_metadata, citing_metadata, sta
             author_key = f"{author['name']}_{author['affiliation']}"
             if author_key not in unique_authors:
                 unique_authors.add(author_key)
-                # Разделяем имя на фамилию и инициал
-                name_parts = author['name'].split()
-                surname = name_parts[0] if name_parts else ""
-                initial = name_parts[1] if len(name_parts) > 1 else ""
                 
                 author_details[author_key] = {
-                    'surname': surname,
-                    'initial': initial,
+                    'surname': author['surname'],
+                    'given_name': author['given_name'],
                     'affiliation': author['affiliation']
                 }
     
@@ -5970,4 +5965,5 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
