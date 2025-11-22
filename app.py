@@ -4159,7 +4159,7 @@ def process_author_id_data_parallel(author_list, state):
         return []
     
     # Используем меньше рабочих потоков для избежания rate limiting
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {}
         
         for i, args in enumerate(args_list):
@@ -4196,7 +4196,7 @@ def process_author_id_data_parallel(author_list, state):
                 author_status.text(f"🔍 Processing Author ID data: {i + 1}/{len(args_list)}")
                 
                 # Добавляем небольшую задержку для избежания rate limiting
-                time.sleep(0.5)
+                time.sleep(0.2)
                 
             except Exception as e:
                 print(f"⚠️ Error processing author {author_data['surname']} {author_data['given_name']}: {str(e)}")
@@ -6020,6 +6020,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
