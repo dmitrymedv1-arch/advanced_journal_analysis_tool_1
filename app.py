@@ -4386,7 +4386,9 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 analyzed_stats['all_authors'],
                 citing_stats['all_authors'],
                 analyzed_stats['n_items'],
-                citing_stats['n_items']
+                citing_stats['n_items'],
+                analyzed_metadata,
+                all_citing_metadata
             )
             if combined_authors_data:
                 combined_authors_df = pd.DataFrame(combined_authors_data)
@@ -5681,5 +5683,6 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
