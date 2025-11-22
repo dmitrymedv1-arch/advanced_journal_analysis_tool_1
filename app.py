@@ -3687,372 +3687,28 @@ def search_ror_organization_cached(affiliation_name, cache_dict):
     cache_dict[cache_key] = (colab_ror, website)
     
     return colab_ror, website
-
-# === NEW FUNCTIONS FOR AUTHOR IDENTIFIER SEARCH ===
-
-def search_orcid_author(family_name, given_name_initials="", affiliation=""):
-    """
-    Search for ORCID, Scopus ID, and WoS ID for an author
-    Returns: (orcid_url, scopus_url, wos_url)
-    """
-    if not family_name:
-        return "", "", ""
     
-    try:
-        # Формируем запрос к ORCID API
-        base_url = "https://pub.orcid.org/v3.0/search/"
-        query_parts = [f"family-name:{family_name}"]
-        
-        if given_name_initials:
-            # Для инициалов имени используем более широкий поиск
-            query_parts.append(f"given-names:{given_name_initials}*")
-        
-        if affiliation:
-            query_parts.append(f"affiliation-org-name:{affiliation}")
-        
-        params = {
-            "q": " AND ".join(query_parts),
-            "rows": 5  # Ограничиваем количество результатов для скорости
-        }
-        
-        headers = {
-            "Accept": "application/json"
-        }
-        
-        print(f"🔍 Searching ORCID for: {family_name}, {given_name_initials}, {affiliation}")
-        response = requests.get(base_url, params=params, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            if not data.get('result'):
-                print(f"❌ No ORCID results found for {family_name}")
-                return "", "", ""
-            
-            # Обрабатываем результаты
-            for result in data['result']:
-                orcid_id = result.get('orcid-identifier', {}).get('path')
-                if orcid_id:
-                    print(f"✅ Found ORCID: {orcid_id}")
-                    
-                    # Получаем полную информацию для извлечения других идентификаторов
-                    orcid_url = f"https://orcid.org/{orcid_id}"
-                    scopus_url, wos_url = get_other_identifiers_from_orcid(orcid_id)
-                    
-                    return orcid_url, scopus_url, wos_url
-        
-        print(f"❌ No valid ORCID found for {family_name}")
-        return "", "", ""
-        
-    except Exception as e:
-        print(f"🚨 Error searching ORCID for {family_name}: {str(e)}")
-        return "", "", ""
-
-def get_other_identifiers_from_orcid(orcid_id):
-    """
-    Extract Scopus ID and WoS ID from ORCID profile
-    Returns: (scopus_url, wos_url)
-    """
-    scopus_url = ""
-    wos_url = ""
+def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles):
+    """Создает объединенный лист авторов анализируемых и цитирующих статей"""
     
-    try:
-        headers = {"Accept": "application/json"}
-        
-        # Получаем информацию о личности
-        person_url = f"https://pub.orcid.org/v3.0/{orcid_id}/person"
-        response = requests.get(person_url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            person_data = response.json()
-            
-            # Ищем Scopus ID
-            scopus_ids = person_data.get('person-external-identifiers', {}).get('external-identifiers', [])
-            for scopus_id in scopus_ids:
-                id_type = scopus_id.get('external-identifier-type', '')
-                id_value = scopus_id.get('external-identifier-value', '')
-                
-                if id_type and 'scopus' in id_type.lower() and id_value:
-                    scopus_url = f"https://www.scopus.com/authid/detail.uri?authorId={id_value}"
-                    print(f"✅ Found Scopus ID: {id_value}")
-                    break
-            
-            # Ищем ResearcherID (WoS)
-            researcher_ids = person_data.get('researcher-uris', {}).get('researcher-uri', [])
-            for res_id in researcher_ids:
-                id_value = res_id.get('uri', {}).get('path', '')
-                if id_value and 'researcherid' in id_value.lower():
-                    wos_url = res_id.get('uri', {}).get('value', '')
-                    print(f"✅ Found ResearcherID: {id_value}")
-                    break
-            
-            # Также проверяем внешние идентификаторы
-            external_ids_url = f"https://pub.orcid.org/v3.0/{orcid_id}/external-identifiers"
-            response = requests.get(external_ids_url, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                ext_data = response.json()
-                external_ids = ext_data.get('external-identifier', [])
-                
-                for ext_id in external_ids:
-                    id_type = ext_id.get('external-id-type', '').lower()
-                    id_value = ext_id.get('external-id-value', '')
-                    
-                    if not scopus_url and 'scopus' in id_type and id_value:
-                        scopus_url = f"https://www.scopus.com/authid/detail.uri?authorId={id_value}"
-                        print(f"✅ Found Scopus ID from external: {id_value}")
-                    
-                    if not wos_url and 'researcherid' in id_type and id_value:
-                        wos_url = f"http://www.researcherid.com/rid/{id_value}"
-                        print(f"✅ Found ResearcherID from external: {id_value}")
-        
-    except Exception as e:
-        print(f"🚨 Error getting identifiers from ORCID {orcid_id}: {str(e)}")
+    # Нормализуем имена авторов и объединяем счетчики
+    def normalize_and_aggregate(authors_list):
+        normalized_counts = Counter()
+        for author, count in authors_list:
+            normalized_name = normalize_author_name(author)
+            normalized_counts[normalized_name] += count
+        return normalized_counts
     
-    return scopus_url, wos_url
-
-def search_author_identifiers_cached(author_name, affiliation, cache_dict):
-    """
-    Cached version of author identifier search
-    Returns: (orcid_url, scopus_url, wos_url)
-    """
-    if not author_name:
-        return "", "", ""
+    analyzed_authors = normalize_and_aggregate(analyzed_authors_data)
+    citing_authors = normalize_and_aggregate(citing_authors_data)
     
-    # Use cache to avoid duplicate API calls
-    cache_key = f"{author_name}_{affiliation}".strip().lower()
-    
-    if cache_key in cache_dict:
-        return cache_dict[cache_key]
-    
-    # Extract family name and initials from author name
-    family_name = ""
-    given_name_initials = ""
-    
-    try:
-        # Разделяем имя на части
-        parts = author_name.split()
-        if len(parts) >= 2:
-            family_name = parts[0]  # Фамилия - первая часть
-            given_name_part = parts[1]  # Инициалы - вторая часть
-            
-            # Извлекаем первую букву инициалов
-            if '.' in given_name_part:
-                # Если есть точки: "E.Y." -> берем "E"
-                first_initials = re.findall(r'[A-Z]\.', given_name_part)
-                if first_initials:
-                    given_name_initials = first_initials[0].replace('.', '')
-                else:
-                    given_name_initials = given_name_part[0] if given_name_part else ""
-            else:
-                # Без точек: "EY" -> берем "E"
-                given_name_initials = given_name_part[0] if given_name_part else ""
-    except:
-        # Если не удалось разобрать имя, используем всю строку как фамилию
-        family_name = author_name
-    
-    # Выполняем поиск
-    orcid_url, scopus_url, wos_url = search_orcid_author(family_name, given_name_initials, affiliation)
-    
-    # Cache the result
-    cache_dict[cache_key] = (orcid_url, scopus_url, wos_url)
-    
-    return orcid_url, scopus_url, wos_url
-    
-def get_work_by_doi(doi):
-    """Получает информацию о научной работе по DOI из OpenAlex API"""
-    if not doi:
-        return None
-    url = f"https://api.openalex.org/works/doi:{doi}"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except:
-        return None
-
-def extract_authors_and_affiliations(work_data):
-    """Извлекает список авторов и их аффилиаций из данных работы в формате 'Фамилия И.'"""
-    if not work_data or 'authorships' not in work_data:
-        return []
-    
-    authors_info = []
-    for authorship in work_data['authorships']:
-        author_data = authorship.get('author', {})
-        institution_data = authorship.get('institutions', [])
-        
-        # Получаем английское имя из доступных вариантов
-        full_name = get_english_author_name(author_data)
-        
-        # Конвертируем формат "Имя Фамилия" в "Фамилия И."
-        author_name = convert_name_to_surname_initials(full_name)
-        
-        # Аффилиация: берем первое учреждение
-        affiliation = 'Unknown Affiliation'
-        if institution_data:
-            first_inst = institution_data[0]
-            affiliation = first_inst.get('display_name', 'Unknown Institution')
-        
-        authors_info.append({
-            'author': author_name,
-            'affiliation': affiliation
-        })
-    
-    return authors_info
-
-def get_english_author_name(author_data):
-    """Выбирает английское имя автора из доступных вариантов"""
-    if not author_data:
-        return 'Unknown Author'
-    
-    main_name = author_data.get('display_name', 'Unknown Author')
-    alternative_names = author_data.get('display_name_alternatives', [])
-    
-    # Собираем все доступные имена
-    all_names = [main_name] + alternative_names
-    
-    # Ищем английские имена
-    english_names = [name for name in all_names if is_english_name(name)]
-    
-    # Если есть английские имена, берем первое
-    if english_names:
-        return english_names[0]
-    
-    # Если нет английских имен, используем основное имя
-    return main_name
-
-def is_english_name(name):
-    """Проверяет, содержит ли имя только латинские буквы"""
-    if not name:
-        return False
-    return all(c.isascii() and (c.isalpha() or c.isspace() or c in ".-'") for c in name if not c.isspace())
-
-def convert_name_to_surname_initials(full_name):
-    """Конвертирует имя из формата 'Имя Фамилия' в 'Фамилия И.'"""
-    if not full_name or full_name == 'Unknown Author':
-        return full_name
-    
-    parts = full_name.split()
-    parts = [p.strip() for p in parts if p.strip()]
-    
-    if len(parts) == 0:
-        return full_name
-    elif len(parts) == 1:
-        return parts[0]
-    else:
-        # Последняя часть - фамилия
-        family_name = parts[-1]
-        
-        # Все остальные части - имена, берем первые буквы
-        initials = []
-        for part in parts[:-1]:
-            if part and part[0].isupper():
-                initials.append(part[0] + '.')
-        
-        if initials:
-            return f"{family_name} {' '.join(initials)}".strip()
-        else:
-            return family_name
-
-def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, analyzed_total_articles, citing_total_articles, analyzed_data, citing_data):
-    """Создает объединенный лист авторов анализируемых и цитирующих статей с правильными аффилиациями"""
-    
-    # Кэш для данных работ по DOI
-    work_data_cache = {}
-    
-    def get_cached_work_data(doi):
-        if not doi:
-            return None
-        if doi in work_data_cache:
-            return work_data_cache[doi]
-        work_data = get_work_by_doi(doi)
-        work_data_cache[doi] = work_data
-        return work_data
-    
-    # Создаем словарь для хранения авторов и их аффилиаций
-    author_affiliations = defaultdict(set)
-    author_counts = Counter()
-    
-    # Обрабатываем анализируемые статьи
-    print("🔍 Processing analyzed articles for authors and affiliations...")
-    analyzed_count = 0
-    for meta in analyzed_data:
-        if not meta:
-            continue
-        
-        doi = None
-        cr = meta.get('crossref')
-        if cr and cr.get('DOI'):
-            doi = cr.get('DOI')
-        
-        if doi:
-            work_data = get_cached_work_data(doi)
-            if work_data:
-                authors_info = extract_authors_and_affiliations(work_data)
-                for author_info in authors_info:
-                    author_name = author_info['author']
-                    affiliation = author_info['affiliation']
-                    
-                    author_counts[author_name] += 1
-                    if affiliation and affiliation != 'Unknown Affiliation':
-                        author_affiliations[author_name].add(affiliation)
-                analyzed_count += 1
-    
-    print(f"✅ Processed {analyzed_count} analyzed articles")
-    
-    # Обрабатываем цитирующие статьи
-    print("🔍 Processing citing articles for authors and affiliations...")
-    citing_count = 0
-    for meta in citing_data:
-        if not meta:
-            continue
-        
-        doi = meta.get('doi')
-        if not doi:
-            cr = meta.get('crossref')
-            if cr and cr.get('DOI'):
-                doi = cr.get('DOI')
-        
-        if doi:
-            work_data = get_cached_work_data(doi)
-            if work_data:
-                authors_info = extract_authors_and_affiliations(work_data)
-                for author_info in authors_info:
-                    author_name = author_info['author']
-                    affiliation = author_info['affiliation']
-                    
-                    author_counts[author_name] += 1
-                    if affiliation and affiliation != 'Unknown Affiliation':
-                        author_affiliations[author_name].add(affiliation)
-                citing_count += 1
-    
-    print(f"✅ Processed {citing_count} citing articles")
-    print(f"📊 Total unique authors found: {len(author_counts)}")
-    print(f"📊 Authors with affiliations: {len([a for a, affs in author_affiliations.items() if affs])}")
-    
-    # Создаем объединенные данные
     combined_data = []
-    all_authors = set(author_counts.keys())
+    all_authors = set(analyzed_authors.keys()) | set(citing_authors.keys())
     
-    # Кэш для поиска идентификаторов авторов
-    author_identifiers_cache = {}
-    
-    # Получаем счетчики из исходных данных для анализируемых и цитирующих авторов
-    analyzed_authors_dict = dict(analyzed_authors_data)
-    citing_authors_dict = dict(citing_authors_data)
-    
-    print("🔍 Creating combined authors data...")
-    for i, author in enumerate(all_authors):
-        analyzed_count = analyzed_authors_dict.get(author, 0)
-        citing_count = citing_authors_dict.get(author, 0)
-        total_publications = author_counts[author]
-        
-        # Получаем аффилиации автора
-        affiliations = author_affiliations.get(author, set())
-        primary_affiliation = "Unknown"
-        if affiliations:
-            # Выбираем первую аффилиацию (можно улучшить логику выбора основной)
-            primary_affiliation = sorted(affiliations)[0]
+    for author in all_authors:
+        analyzed_count = analyzed_authors.get(author, 0)
+        citing_count = citing_authors.get(author, 0)
+        total_publications = analyzed_count + citing_count
         
         # Рассчитываем проценты
         analyzed_pct = (analyzed_count / analyzed_total_articles * 100) if analyzed_total_articles > 0 else 0
@@ -4066,7 +3722,7 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         else:
             author_status = "Citing Only"
         
-        # Рассчитываем Loyalty Score
+        # Рассчитываем Loyalty Score (процент публикаций от общей активности)
         loyalty_score_pct = (analyzed_count / total_publications * 100) if total_publications > 0 else 0
         
         # Определяем Activity Balance
@@ -4081,12 +3737,8 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
         else:
             activity_balance = "Citing-Heavy"
         
-        # Ищем идентификаторы автора
-        orcid_url, scopus_url, wos_url = search_author_identifiers_cached(author, primary_affiliation, author_identifiers_cache)
-        
         combined_data.append({
             'Author': author,
-            'Affiliation': primary_affiliation,
             'Total': total_publications,
             'Status': author_status,
             'Analyzed_Count': analyzed_count,
@@ -4094,21 +3746,11 @@ def create_combined_authors_sheet(analyzed_authors_data, citing_authors_data, an
             'Loyalty_Score': f"{loyalty_score_pct:.1f}%",
             'Activity_Balance': activity_balance,
             'Analyzed_Pct': round(analyzed_pct, 2),
-            'Citing_Pct': round(citing_pct, 2),
-            '': '',  # Пустая колонка
-            'ORCID ID': orcid_url,
-            'Scopus ID': scopus_url,
-            'WoS ID': wos_url
+            'Citing_Pct': round(citing_pct, 2)
         })
-        
-        # Прогресс каждые 100 авторов
-        if (i + 1) % 100 == 0:
-            print(f"✅ Processed {i + 1}/{len(all_authors)} authors")
     
     # Сортируем по общему количеству публикаций (убывание)
     combined_data.sort(key=lambda x: x['Total'], reverse=True)
-    
-    print(f"🎯 Combined authors sheet created with {len(combined_data)} authors")
     
     return combined_data
 
@@ -4252,9 +3894,14 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             
     try:
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            # Sheet 1: Analyzed articles (with optimization) - УДАЛЕНЫ КОЛОНКИ Used for SC и Used for IF
+            # Sheet 1: Analyzed articles (with optimization)
             analyzed_list = []
             MAX_ROWS = 50000  # Limit for large data
+            
+            # Get special analysis metrics if available
+            state = get_analysis_state()
+            special_metrics = additional_data.get('special_analysis_metrics', {})
+            analyzed_articles_usage = special_metrics.get('debug_info', {}).get('analyzed_articles_usage', {})
             
             for i, item in enumerate(analyzed_data):
                 if i >= MAX_ROWS:
@@ -4266,6 +3913,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     journal_info = extract_journal_info(item)
                     
                     analyzed_doi = cr.get('DOI', '')
+                    usage_info = analyzed_articles_usage.get(analyzed_doi, {})
                     
                     analyzed_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -4282,16 +3930,24 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
-                        'Work_Type': safe_convert(cr.get('type', ''))[:50]
-                        # УДАЛЕНЫ КОЛОНКИ: 'Used for SC', 'Used for IF'
+                        'Work_Type': safe_convert(cr.get('type', ''))[:50],
+                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
+                        'Used for IF': '×' if usage_info.get('used_for_if') else ''
                     })
             
             if analyzed_list:
                 analyzed_df = pd.DataFrame(analyzed_list)
                 analyzed_df.to_excel(writer, sheet_name='Analyzed_Articles', index=False)
 
-            # Sheet 2: Citing works (with optimization) - УДАЛЕНЫ КОЛОНКИ Used for SC, Used for SC_corr, Used for IF, Used for IF_corr
+            # Sheet 2: Citing works (with optimization) - UPDATED WITH 4 NEW COLUMNS
             citing_list = []
+            
+            # Get citing articles usage from special analysis metrics - FIXED LOGIC
+            citing_usage_dict = {}
+            if 'special_analysis_metrics' in additional_data:
+                debug_info = additional_data['special_analysis_metrics'].get('debug_info', {})
+                citing_usage_dict = debug_info.get('citing_articles_usage', {})
+                print(f"🔍 DEBUG: Loaded citing_usage_dict with {len(citing_usage_dict)} entries for Citing_Works sheet")
             
             for i, item in enumerate(citing_data):
                 if i >= MAX_ROWS:
@@ -4303,6 +3959,13 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     journal_info = extract_journal_info(item)
                     
                     citing_doi = cr.get('DOI', '')
+                    
+                    # FIXED: Properly extract usage information from citing_usage_dict
+                    usage_info = citing_usage_dict.get(citing_doi, {})
+                    
+                    # Debug output for first few records
+                    if i < 5 and citing_doi:
+                        print(f"🔍 Citing_Works DEBUG - Item {i}: DOI={citing_doi}, usage_info={usage_info}")
                     
                     citing_list.append({
                         'DOI': safe_convert(cr.get('DOI', ''))[:100],
@@ -4319,8 +3982,12 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
-                        'Work_Type': safe_convert(cr.get('type', ''))[:50]
-                        # УДАЛЕНЫ КОЛОНКИ: 'Used for SC', 'Used for SC_corr', 'Used for IF', 'Used for IF_corr'
+                        'Work_Type': safe_convert(cr.get('type', ''))[:50],
+                        # FIXED: 4 columns for special analysis usage - using proper dictionary access
+                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
+                        'Used for SC_corr': '×' if usage_info.get('used_for_sc_corr') else '',
+                        'Used for IF': '×' if usage_info.get('used_for_if') else '',
+                        'Used for IF_corr': '×' if usage_info.get('used_for_if_corr') else ''
                     })
             
             if citing_list:
@@ -4522,14 +4189,12 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
 
             # === NEW COMBINED SHEETS ===
 
-            # Sheet 9: Combined Authors (REPLACES All_Authors_Analyzed and All_Authors_Citing) - ОБНОВЛЕНА С НОВЫМИ КОЛОНКАМИ
+            # Sheet 9: Combined Authors (REPLACES All_Authors_Analyzed and All_Authors_Citing)
             combined_authors_data = create_combined_authors_sheet(
                 analyzed_stats['all_authors'],
                 citing_stats['all_authors'],
                 analyzed_stats['n_items'],
-                citing_stats['n_items'],
-                analyzed_data,
-                citing_data
+                citing_stats['n_items']
             )
             if combined_authors_data:
                 combined_authors_df = pd.DataFrame(combined_authors_data)
@@ -5824,14 +5489,3 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
