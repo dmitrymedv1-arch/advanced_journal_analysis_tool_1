@@ -170,12 +170,41 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
         else:
             future_special = None
         
-        # ROR data processing (if needed)
+        # ROR data processing (if needed) - ИСПРАВЛЕННАЯ ЧАСТЬ
         if state.include_ror_data:
-            affiliations_list = list(set(analyzed_metadata['all_affiliations_list'] + citing_metadata['all_affiliations_list']))
+            # Получаем affiliations_list из статистики, а не из метаданных
+            analyzed_affiliations = []
+            citing_affiliations = []
+            
+            # Временное решение: извлекаем affiliations из самих метаданных
+            for item in analyzed_metadata:
+                if item and item.get('openalex'):
+                    _, affiliations, _ = extract_affiliations_and_countries(item.get('openalex'))
+                    analyzed_affiliations.extend(affiliations)
+            
+            for item in citing_metadata:
+                if item and item.get('openalex'):
+                    _, affiliations, _ = extract_affiliations_and_countries(item.get('openalex'))
+                    citing_affiliations.extend(affiliations)
+            
+            affiliations_list = list(set(analyzed_affiliations + citing_affiliations))
             future_ror = executor.submit(process_ror_data_parallel, affiliations_list, state)
         else:
             future_ror = None
+        
+        # Collect results
+        results = {
+            'keywords': future_keywords.result(),
+            'seasonality': future_seasonality.result(),
+            'reviewers': future_reviewers.result()
+        }
+        
+        if future_special:
+            results['special_analysis'] = future_special.result()
+        if future_ror:
+            results['ror_data'] = future_ror.result()
+        
+        return results
         
         # Collect results
         results = {
@@ -6147,4 +6176,5 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
