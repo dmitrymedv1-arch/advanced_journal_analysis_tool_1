@@ -5898,10 +5898,32 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     delayer = AdaptiveDelayer()
 
     analysis_start_time = time.time()
-    st.info("⏱️ Starting analysis timer...")
+    
+    # Создаем контейнер для счетчика общего времени
+    timer_container = st.empty()
+    timer_container.info("⏱️ Starting analysis...")
     
     state = get_analysis_state()
     state.analysis_complete = False
+    
+    # Функция для обновления счетчика общего времени
+    def update_timer():
+        elapsed_time = time.time() - analysis_start_time
+        minutes = int(elapsed_time // 60)
+        seconds = int(elapsed_time % 60)
+        timer_container.info(f"⏱️ Total analysis time: {minutes:02d}:{seconds:02d}")
+    
+    # Запускаем обновление таймера в отдельном потоке
+    import threading
+    stop_timer = False
+    
+    def timer_thread():
+        while not stop_timer:
+            update_timer()
+            time.sleep(1)  # Обновляем каждую секунду
+    
+    timer_thread = threading.Thread(target=timer_thread, daemon=True)
+    timer_thread.start()
     
     # Set analysis modes
     state.is_special_analysis = special_analysis
@@ -6177,6 +6199,16 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     overall_progress.empty()
     overall_status.empty()
 
+    # Останавливаем таймер
+    stop_timer = True
+    timer_thread.join(timeout=1)
+    
+    # Финальное отображение времени
+    elapsed_time = time.time() - analysis_start_time
+    minutes = int(elapsed_time // 60)
+    seconds = int(elapsed_time % 60)
+    timer_container.success(f"✅ Total analysis completed in: {minutes:02d}:{seconds:02d}")
+
 # =============================================================================
 # 20. UPDATED MAIN INTERFACE WITH OPTIMIZED ANALYSIS
 # =============================================================================
@@ -6421,6 +6453,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
