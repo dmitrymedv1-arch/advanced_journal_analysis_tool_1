@@ -1213,7 +1213,7 @@ class MetricsCalculator:
 # =============================================================================
 # STATE MANAGEMENT (ORIGINAL)
 # =============================================================================
-
+  
 class AnalysisState:
     """Enhanced state management for analysis"""
     
@@ -4258,9 +4258,13 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
     
     # NEW: Process ROR data in parallel if enabled
     ror_results = {}
-    if state.include_ror_data:
-        affiliations_list = list(all_affiliations)
-        ror_results = process_ror_data_parallel(affiliations_list, state)
+    if state.include_ror_data and hasattr(state, 'ror_cache'):
+        try:
+            affiliations_list = list(all_affiliations)
+            ror_results = process_ror_data_parallel(affiliations_list, state)
+        except Exception as e:
+            print(f"Warning: ROR data processing failed: {e}")
+            ror_results = {}
     
     for affiliation in all_affiliations:
         analyzed_count = analyzed_affiliations.get(affiliation, 0)
@@ -4297,12 +4301,15 @@ def create_combined_affiliations_sheet(analyzed_affiliations_data, citing_affili
         # NEW: Get ROR information from cache or API results
         colab_ror = ""
         website = ""
-        if state.include_ror_data:
+        if state.include_ror_data and hasattr(state, 'ror_cache'):
             if affiliation in ror_results:
                 colab_ror, website = ror_results[affiliation]
             else:
                 # Fallback to direct search if not in results
-                colab_ror, website = search_ror_organization_cached(affiliation, state.ror_cache)
+                try:
+                    colab_ror, website = search_ror_organization_cached(affiliation, state.ror_cache)
+                except Exception as e:
+                    print(f"Warning: ROR search failed for {affiliation}: {e}")
         
         combined_data.append({
             'Affiliation': affiliation,
@@ -6468,6 +6475,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
