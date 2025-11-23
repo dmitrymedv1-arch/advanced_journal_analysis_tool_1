@@ -46,6 +46,41 @@ _metrics_calculation_cache = {}
 _excel_format_cache = {}
 _ror_search_cache = {}
 _orcid_search_cache = {}
+_article_data_cache = {}
+_journal_info_cache = {}
+
+def cached_extract_article_data(metadata):
+    """Кэшированное извлечение всех данных статьи"""
+    if not metadata:
+        return {'authors': [], 'affiliations': [], 'countries': []}
+    
+    cache_key = hash(json.dumps(metadata, sort_keys=True) if isinstance(metadata, dict) else str(metadata))
+    if cache_key in _article_data_cache:
+        return _article_data_cache[cache_key]
+    
+    authors, affiliations, countries = extract_affiliations_and_countries(metadata.get('openalex'))
+    
+    result = {
+        'authors': authors,
+        'affiliations': affiliations, 
+        'countries': countries
+    }
+    
+    _article_data_cache[cache_key] = result
+    return result
+
+def cached_extract_journal_info(metadata):
+    """Кэшированное извлечение информации о журнале"""
+    if not metadata:
+        return {'issn': [], 'journal_name': '', 'publisher': ''}
+    
+    cache_key = hash(json.dumps(metadata, sort_keys=True) if isinstance(metadata, dict) else str(metadata))
+    if cache_key in _journal_info_cache:
+        return _journal_info_cache[cache_key]
+    
+    result = extract_journal_info(metadata)
+    _journal_info_cache[cache_key] = result
+    return result
 
 def clear_old_cache():
     """Clear outdated caches to free memory"""
@@ -402,6 +437,29 @@ def optimized_get_journal_name(issn):
 def optimized_normalize_issn(issn):
     """Optimized ISSN normalization with caching"""
     return cached_normalize_issn(issn)
+
+def process_data_in_chunks(data, chunk_size=500, process_func=None):
+    """Обработка данных блоками для уменьшения потребления памяти"""
+    if not data:
+        return []
+        
+    results = []
+    total_chunks = (len(data) + chunk_size - 1) // chunk_size
+    
+    for chunk_idx in range(total_chunks):
+        start_idx = chunk_idx * chunk_size
+        end_idx = min((chunk_idx + 1) * chunk_size, len(data))
+        chunk = data[start_idx:end_idx]
+        
+        print(f"📦 Processing chunk {chunk_idx + 1}/{total_chunks} ({len(chunk)} items)")
+        
+        if process_func:
+            chunk_results = process_func(chunk)
+            results.extend(chunk_results)
+        else:
+            results.extend(chunk)
+    
+    return results
 
 # =============================================================================
 # CONFIGURATION AND SETTINGS (ORIGINAL)
@@ -4727,9 +4785,75 @@ def create_author_id_sheet(analyzed_metadata, citing_metadata, state):
     return final_data
 
 # === 17. Enhanced Excel Report Creation ===
+def precompute_excel_data(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, additional_data, state):
+    """Предварительный расчет всех данных для Excel отчетов"""
+    
+    print("🔍 Precomputing data for Excel generation...")
+    
+    # Предварительно извлекаем все данные и кэшируем
+    analyzed_precomputed = []
+    for item in analyzed_data:
+        if item and item.get('crossref'):
+            cr = item['crossref']
+            oa = item.get('openalex', {})
+            
+            # Используем кэшированные функции
+            article_data = cached_extract_article_data({'openalex': oa})
+            journal_info = cached_extract_journal_info(item)
+            
+            analyzed_precomputed.append({
+                'cr': cr,
+                'oa': oa,
+                'article_data': article_data,
+                'journal_info': journal_info,
+                'doi': cr.get('DOI', '')
+            })
+    
+    citing_precomputed = []
+    for item in citing_data:
+        if item and item.get('crossref'):
+            cr = item['crossref']
+            oa = item.get('openalex', {})
+            
+            article_data = cached_extract_article_data({'openalex': oa})
+            journal_info = cached_extract_journal_info(item)
+            
+            citing_precomputed.append({
+                'cr': cr,
+                'oa': oa, 
+                'article_data': article_data,
+                'journal_info': journal_info,
+                'doi': cr.get('DOI', '')
+            })
+    
+    # Предварительно вычисляем usage данные для Special Analysis
+    special_metrics = additional_data.get('special_analysis_metrics', {})
+    analyzed_articles_usage = special_metrics.get('debug_info', {}).get('analyzed_articles_usage', {})
+    citing_articles_usage = special_metrics.get('debug_info', {}).get('citing_articles_usage', {})
+    
+    return {
+        'analyzed_precomputed': analyzed_precomputed,
+        'citing_precomputed': citing_precomputed,
+        'analyzed_articles_usage': analyzed_articles_usage,
+        'citing_articles_usage': citing_articles_usage
+    }
+
 def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
     """Create enhanced Excel report with error handling for large data"""
-
+    
+    # ДОБАВИТЬ В НАЧАЛО ФУНКЦИИ:
+    state = get_analysis_state()
+    precomputed_data = precompute_excel_data(
+        analyzed_data, citing_data, analyzed_stats, citing_stats, 
+        enhanced_stats, citation_timing, overlap_details, fast_metrics, 
+        additional_data, state
+    )
+    
+    analyzed_precomputed = precomputed_data['analyzed_precomputed']
+    citing_precomputed = precomputed_data['citing_precomputed']
+    analyzed_articles_usage = precomputed_data['analyzed_articles_usage']
+    citing_articles_usage = precomputed_data['citing_articles_usage']
+    
     def safe_convert(value):
         """Safely convert numpy types to Python native types"""
         if value is None:
@@ -4756,7 +4880,39 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
             # Sheet 1: Analyzed articles (with optimization)
             analyzed_list = []
-            MAX_ROWS = 50000  # Limit for large data
+            MAX_ROWS = 50000
+            
+            # ИСПОЛЬЗУЕМ ПРЕДВАРИТЕЛЬНО ВЫЧИСЛЕННЫЕ ДАННЫЕ
+            for i, precomputed in enumerate(analyzed_precomputed):
+                if i >= MAX_ROWS:
+                    break
+                    
+                cr = precomputed['cr']
+                article_data = precomputed['article_data']
+                journal_info = precomputed['journal_info']
+                
+                analyzed_doi = cr.get('DOI', '')
+                usage_info = analyzed_articles_usage.get(analyzed_doi, {})
+                
+                analyzed_list.append({
+                    'DOI': safe_convert(cr.get('DOI', ''))[:100],
+                    'Title': (cr.get('title', [''])[0] if cr.get('title') else 'No title')[:200],
+                    'Authors_Crossref': safe_join([f"{a.get('given', '')} {a.get('family', '')}".strip() for a in cr.get('author', []) if a.get('given') or a.get('family')])[:300],
+                    'Authors_OpenAlex': safe_join(article_data['authors'])[:300],  # ИЗ КЭША
+                    'Affiliations': safe_join(article_data['affiliations'])[:500],  # ИЗ КЭША
+                    'Countries': safe_join(article_data['countries'])[:100],  # ИЗ КЭША
+                    'Publication_Year': safe_convert(cr.get('published', {}).get('date-parts', [[0]])[0][0]),
+                    'Journal': safe_convert(journal_info['journal_name'])[:100],  # ИЗ КЭША
+                    'Publisher': safe_convert(journal_info['publisher'])[:100],  # ИЗ КЭША
+                    'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],  # ИЗ КЭША
+                    'Reference_Count': safe_convert(cr.get('reference-count', 0)),
+                    'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
+                    'Citations_OpenAlex': safe_convert(precomputed['oa'].get('cited_by_count', 0)) if precomputed['oa'] else 0,
+                    'Author_Count': safe_convert(len(cr.get('author', []))),
+                    'Work_Type': safe_convert(cr.get('type', ''))[:50],
+                    'Used for SC': '×' if usage_info.get('used_for_sc') else '',
+                    'Used for IF': '×' if usage_info.get('used_for_if') else ''
+                })
             
             # Get special analysis metrics if available
             state = get_analysis_state()
@@ -5355,6 +5511,67 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
         except Exception as e2:
             st.error(translation_manager.get_text('critical_excel_error').format(error=str(e2)))
             return False
+
+def precompute_excel_data(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, additional_data, state):
+    """Предварительный расчет всех данных для Excel отчетов"""
+    
+    print("🔍 Precomputing data for Excel generation...")
+    
+    # Обработка анализируемых данных блоками
+    def process_analyzed_chunk(chunk):
+        chunk_results = []
+        for item in chunk:
+            if item and item.get('crossref'):
+                cr = item['crossref']
+                oa = item.get('openalex', {})
+                
+                article_data = cached_extract_article_data({'openalex': oa})
+                journal_info = cached_extract_journal_info(item)
+                
+                chunk_results.append({
+                    'cr': cr,
+                    'oa': oa,
+                    'article_data': article_data,
+                    'journal_info': journal_info,
+                    'doi': cr.get('DOI', '')
+                })
+        return chunk_results
+    
+    analyzed_precomputed = process_data_in_chunks(analyzed_data, 500, process_analyzed_chunk)
+    
+    # Аналогично для citing данных
+    def process_citing_chunk(chunk):
+        chunk_results = []
+        for item in chunk:
+            if item and item.get('crossref'):
+                cr = item['crossref']
+                oa = item.get('openalex', {})
+                
+                article_data = cached_extract_article_data({'openalex': oa})
+                journal_info = cached_extract_journal_info(item)
+                
+                chunk_results.append({
+                    'cr': cr,
+                    'oa': oa,
+                    'article_data': article_data,
+                    'journal_info': journal_info,
+                    'doi': cr.get('DOI', '')
+                })
+        return chunk_results
+    
+    citing_precomputed = process_data_in_chunks(citing_data, 500, process_citing_chunk)
+    
+    # Предварительно вычисляем usage данные для Special Analysis
+    special_metrics = additional_data.get('special_analysis_metrics', {})
+    analyzed_articles_usage = special_metrics.get('debug_info', {}).get('analyzed_articles_usage', {})
+    citing_articles_usage = special_metrics.get('debug_info', {}).get('citing_articles_usage', {})
+    
+    return {
+        'analyzed_precomputed': analyzed_precomputed,
+        'citing_precomputed': citing_precomputed,
+        'analyzed_articles_usage': analyzed_articles_usage,
+        'citing_articles_usage': citing_articles_usage
+    }
 
 # === 18. Data Visualization ===
 def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, additional_data, is_special_analysis=False):
@@ -6175,6 +6392,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
