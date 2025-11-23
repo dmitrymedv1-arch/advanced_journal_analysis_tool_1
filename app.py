@@ -152,7 +152,7 @@ def parallel_metrics_calculation(analyzed_metadata, citing_metadata, state, jour
             'overlap': future_overlap.result()
         }
 
-def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing_data):
+def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing_data, analyzed_stats=None, citing_stats=None):
     """Parallel execution of independent analyses"""
     with ThreadPoolExecutor(max_workers=5) as executor:
         # Title keywords analysis
@@ -164,19 +164,18 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
         # Potential reviewers
         future_reviewers = executor.submit(find_potential_reviewers, analyzed_metadata, citing_metadata, [], state)
         
-        # Special analysis metrics (if needed)
+        # Special analysis metrics (if needed) - ИСПРАВЛЕННЫЙ ВЫЗОВ
         if state.is_special_analysis:
             future_special = executor.submit(calculate_special_analysis_metrics, analyzed_metadata, citing_metadata, state)
         else:
             future_special = None
         
-        # ROR data processing (if needed) - ИСПРАВЛЕННАЯ ЧАСТЬ
+        # ROR data processing (if needed)
         if state.include_ror_data:
-            # Получаем affiliations_list из статистики, а не из метаданных
             analyzed_affiliations = []
             citing_affiliations = []
             
-            # Временное решение: извлекаем affiliations из самих метаданных
+            # Извлекаем affiliations из метаданных
             for item in analyzed_metadata:
                 if item and item.get('openalex'):
                     _, affiliations, _ = extract_affiliations_and_countries(item.get('openalex'))
@@ -6174,6 +6173,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
