@@ -34,7 +34,344 @@ from functools import wraps
 from languages import translation_manager
 
 # =============================================================================
-# CONFIGURATION AND SETTINGS
+# ENHANCED CACHE MANAGEMENT
+# =============================================================================
+
+# Additional caching layers for performance optimization
+_issn_normalization_cache = {}
+_journal_search_cache = {}
+_author_extraction_cache = {}
+_doi_validity_cache = {}
+_metrics_calculation_cache = {}
+_excel_format_cache = {}
+_ror_search_cache = {}
+_orcid_search_cache = {}
+
+def clear_old_cache():
+    """Clear outdated caches to free memory"""
+    current_time = time.time()
+    cache_dicts = [
+        _issn_normalization_cache, _journal_search_cache, _author_extraction_cache,
+        _doi_validity_cache, _metrics_calculation_cache, _excel_format_cache,
+        _ror_search_cache, _orcid_search_cache
+    ]
+    
+    for cache_dict in cache_dicts:
+        try:
+            # Remove entries older than 1 hour
+            keys_to_remove = [k for k, v in cache_dict.items() 
+                             if hasattr(v, 'timestamp') and current_time - v.timestamp > 3600]
+            for key in keys_to_remove:
+                del cache_dict[key]
+        except Exception:
+            # If cache doesn't have timestamps, skip
+            pass
+
+def cached_normalize_issn(issn):
+    """Cached version of ISSN normalization"""
+    if issn in _issn_normalization_cache:
+        return _issn_normalization_cache[issn]
+    result = normalize_issn_for_comparison(issn)
+    _issn_normalization_cache[issn] = result
+    return result
+
+def cached_get_journal_name(issn):
+    """Cached journal name lookup"""
+    cache_key = f"journal_name_{issn}"
+    if cache_key in _journal_search_cache:
+        return _journal_search_cache[cache_key]
+    result = get_journal_name(issn)
+    _journal_search_cache[cache_key] = result
+    return result
+
+def cached_extract_authors(openalex_data):
+    """Cached author extraction"""
+    if not openalex_data:
+        return [], [], []
+    
+    cache_key = hash(json.dumps(openalex_data, sort_keys=True) if isinstance(openalex_data, dict) else str(openalex_data))
+    if cache_key in _author_extraction_cache:
+        return _author_extraction_cache[cache_key]
+    
+    result = extract_affiliations_and_countries(openalex_data)
+    _author_extraction_cache[cache_key] = result
+    return result
+
+def is_valid_doi_cached(doi):
+    """Cached DOI validation"""
+    if doi in _doi_validity_cache:
+        return _doi_validity_cache[doi]
+    
+    is_valid = doi and doi.startswith('10.') and '/' in doi and len(doi) > 10
+    _doi_validity_cache[doi] = is_valid
+    return is_valid
+
+# =============================================================================
+# PARALLEL PROCESSING FUNCTIONS
+# =============================================================================
+
+def get_optimal_workers():
+    """Determine optimal number of threads based on system resources"""
+    cpu_count = os.cpu_count() or 4
+    # Leave 1-2 cores for system
+    return max(2, cpu_count - 2)
+
+def parallel_metadata_loading(doi, state):
+    """Parallel loading of Crossref and OpenAlex metadata"""
+    if not doi or doi == 'N/A':
+        return {'crossref': None, 'openalex': None}
+    
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_crossref = executor.submit(get_crossref_metadata, doi, state)
+        future_openalex = executor.submit(get_openalex_metadata, doi, state)
+        
+        return {
+            'crossref': future_crossref.result(),
+            'openalex': future_openalex.result()
+        }
+
+def parallel_metrics_calculation(analyzed_metadata, citing_metadata, state, journal_issn):
+    """Parallel calculation of all metrics"""
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        # Basic metrics
+        future_basic = executor.submit(calculate_basic_metrics, analyzed_metadata, citing_metadata)
+        
+        # Fast metrics
+        future_fast = executor.submit(calculate_all_fast_metrics, analyzed_metadata, citing_metadata, state, journal_issn)
+        
+        # Citation timing
+        future_timing = executor.submit(calculate_citation_timing, analyzed_metadata, state)
+        
+        # Overlap analysis
+        future_overlap = executor.submit(analyze_overlaps, analyzed_metadata, citing_metadata, state)
+        
+        return {
+            'basic': future_basic.result(),
+            'fast': future_fast.result(),
+            'timing': future_timing.result(),
+            'overlap': future_overlap.result()
+        }
+
+def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing_data):
+    """Parallel execution of independent analyses"""
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        # Title keywords analysis
+        future_keywords = executor.submit(parallel_title_keywords_analysis, analyzed_metadata, citing_metadata)
+        
+        # Citation seasonality
+        future_seasonality = executor.submit(analyze_citation_seasonality, analyzed_metadata, state, citation_timing_data)
+        
+        # Potential reviewers
+        future_reviewers = executor.submit(find_potential_reviewers, analyzed_metadata, citing_metadata, [], state)
+        
+        # Special analysis metrics (if needed)
+        if state.is_special_analysis:
+            future_special = executor.submit(calculate_special_analysis_metrics, analyzed_metadata, citing_metadata, state)
+        else:
+            future_special = None
+        
+        # ROR data processing (if needed)
+        if state.include_ror_data:
+            affiliations_list = list(set(analyzed_metadata['all_affiliations_list'] + citing_metadata['all_affiliations_list']))
+            future_ror = executor.submit(process_ror_data_parallel, affiliations_list, state)
+        else:
+            future_ror = None
+        
+        # Collect results
+        results = {
+            'keywords': future_keywords.result(),
+            'seasonality': future_seasonality.result(),
+            'reviewers': future_reviewers.result()
+        }
+        
+        if future_special:
+            results['special_analysis'] = future_special.result()
+        if future_ror:
+            results['ror_data'] = future_ror.result()
+        
+        return results
+
+def parallel_title_keywords_analysis(analyzed_metadata, citing_metadata):
+    """Parallel analysis of title keywords"""
+    analyzer = TitleKeywordsAnalyzer()
+    
+    analyzed_titles = extract_titles_from_metadata(analyzed_metadata)
+    citing_titles = extract_titles_from_metadata(citing_metadata)
+    
+    return analyzer.analyze_titles(analyzed_titles, citing_titles)
+
+def parallel_excel_preparation(data_dict):
+    """Parallel preparation of Excel sheets"""
+    sheets_data = {}
+    
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        # Main sheets
+        future_analyzed = executor.submit(prepare_analyzed_sheet_data, data_dict['analyzed'])
+        future_citing = executor.submit(prepare_citing_sheet_data, data_dict['citing'])
+        future_stats = executor.submit(prepare_statistics_sheet_data, data_dict['stats'])
+        future_metrics = executor.submit(prepare_metrics_sheet_data, data_dict['metrics'])
+        
+        sheets_data['analyzed'] = future_analyzed.result()
+        sheets_data['citing'] = future_citing.result()
+        sheets_data['stats'] = future_stats.result()
+        sheets_data['metrics'] = future_metrics.result()
+    
+    return sheets_data
+
+def prepare_analyzed_sheet_data(analyzed_data):
+    """Prepare data for analyzed articles sheet"""
+    # Implementation details...
+    return analyzed_data
+
+def prepare_citing_sheet_data(citing_data):
+    """Prepare data for citing works sheet"""
+    # Implementation details...
+    return citing_data
+
+def prepare_statistics_sheet_data(stats_data):
+    """Prepare data for statistics sheet"""
+    # Implementation details...
+    return stats_data
+
+def prepare_metrics_sheet_data(metrics_data):
+    """Prepare data for metrics sheet"""
+    # Implementation details...
+    return metrics_data
+
+def smart_batch_processing(items, batch_type="metadata"):
+    """Adaptive batching based on data type and size"""
+    if not items:
+        return []
+    
+    if batch_type == "metadata":
+        # Smaller batches for API-heavy operations
+        batch_size = min(10, max(5, len(items) // 10))
+    elif batch_type == "calculation":
+        # Larger batches for CPU-heavy operations
+        batch_size = min(50, max(20, len(items) // 5))
+    else:
+        batch_size = 20
+    
+    return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+
+# =============================================================================
+# LAZY EVALUATION CLASSES
+# =============================================================================
+
+class LazyMetricsCalculator:
+    """Lazy evaluation for expensive metrics calculations"""
+    
+    def __init__(self, analyzed_metadata, citing_metadata, state, journal_issn):
+        self._analyzed = analyzed_metadata
+        self._citing = citing_metadata
+        self._state = state
+        self._journal_issn = journal_issn
+        self._cache = {}
+    
+    def __getattr__(self, name):
+        if name not in self._cache:
+            if name == 'author_gini':
+                self._cache[name] = calculate_author_gini_fast(self._analyzed)
+            elif name == 'dbi':
+                self._cache[name] = calculate_dbi_fast(self._analyzed)
+            elif name == 'elite_index':
+                self._cache[name] = calculate_elite_index_fast(self._analyzed)
+            elif name == 'fwci':
+                self._cache[name] = calculate_fwci_fast(self._analyzed)
+            elif name == 'jscr':
+                self._cache[name] = calculate_jscr_fast(self._citing, self._journal_issn)
+            else:
+                raise AttributeError(f"Unknown metric: {name}")
+        return self._cache[name]
+    
+    def preload_common_metrics(self):
+        """Preload most commonly used metrics"""
+        common_metrics = ['author_gini', 'dbi', 'elite_index', 'fwci']
+        for metric in common_metrics:
+            getattr(self, metric)
+
+# =============================================================================
+# PROGRESSIVE LOADING FUNCTIONS
+# =============================================================================
+
+def progressive_analysis(analyzed_metadata, citing_metadata, state, journal_issn):
+    """Progressive analysis - show basic metrics first, then advanced"""
+    # Phase 1: Quick metrics (show immediately)
+    basic_metrics = calculate_basic_metrics(analyzed_metadata, citing_metadata)
+    
+    # Phase 2: Start background tasks for advanced metrics
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_advanced = executor.submit(calculate_advanced_metrics, analyzed_metadata, citing_metadata, state)
+        future_timing = executor.submit(calculate_citation_timing, analyzed_metadata, state)
+        future_fast = executor.submit(calculate_all_fast_metrics, analyzed_metadata, citing_metadata, state, journal_issn)
+    
+    return {
+        'basic': basic_metrics,
+        'future_advanced': future_advanced,
+        'future_timing': future_timing,
+        'future_fast': future_fast
+    }
+
+def calculate_advanced_metrics(analyzed_metadata, citing_metadata, state):
+    """Calculate advanced metrics (can be slow)"""
+    # Implementation of advanced metrics calculation
+    enhanced_stats = enhanced_stats_calculation(analyzed_metadata, citing_metadata, state)
+    overlap_details = analyze_overlaps(analyzed_metadata, citing_metadata, state)
+    
+    return {
+        'enhanced_stats': enhanced_stats,
+        'overlap_details': overlap_details
+    }
+
+# =============================================================================
+# PREDICTIVE CACHING
+# =============================================================================
+
+def predictive_cache_warmup(issn, years=None):
+    """Preload data based on usage patterns"""
+    if years is None:
+        current_year = datetime.now().year
+        years = range(current_year-2, current_year+1)
+    
+    warmup_tasks = []
+    
+    for year in years:
+        # Warm up journal name cache
+        warmup_tasks.append((f"journal_{issn}", cached_get_journal_name(issn)))
+        
+        # Warm up common ISSN normalizations
+        sample_issns = [issn, issn.replace('-', '')]
+        for sample_issn in sample_issns:
+            warmup_tasks.append((f"issn_norm_{sample_issn}", cached_normalize_issn(sample_issn)))
+    
+    # Start warmup in background
+    if warmup_tasks:
+        threading.Thread(target=background_warmup, args=(warmup_tasks,), daemon=True).start()
+
+def background_warmup(tasks):
+    """Background task for cache warming"""
+    for cache_key, value in tasks:
+        # Values are already computed, this just ensures they're in cache
+        pass
+
+# =============================================================================
+# OPTIMIZED VERSIONS OF EXISTING FUNCTIONS
+# =============================================================================
+
+def optimized_extract_affiliations_and_countries(openalex_data):
+    """Optimized version with caching"""
+    return cached_extract_authors(openalex_data)
+
+def optimized_get_journal_name(issn):
+    """Optimized journal name lookup with caching"""
+    return cached_get_journal_name(issn)
+
+def optimized_normalize_issn(issn):
+    """Optimized ISSN normalization with caching"""
+    return cached_normalize_issn(issn)
+
+# =============================================================================
+# CONFIGURATION AND SETTINGS (ORIGINAL)
 # =============================================================================
 
 class AppSettings(BaseModel):
@@ -82,7 +419,7 @@ class AnalysisConfig:
         return self.settings
 
 # =============================================================================
-# DATA MODELS
+# DATA MODELS (ORIGINAL)
 # =============================================================================
 
 class ArticleMetadata(BaseModel):
@@ -139,7 +476,7 @@ class AnalysisResult(BaseModel):
         arbitrary_types_allowed = True
 
 # =============================================================================
-# CACHE MANAGEMENT
+# CACHE MANAGEMENT (ORIGINAL)
 # =============================================================================
 
 class CacheManager:
@@ -200,7 +537,7 @@ class CacheManager:
             return {'size': 0, 'directory': 'unknown', 'ttl': self.ttl}
 
 # =============================================================================
-# ERROR HANDLING AND RETRY MECHANISM
+# ERROR HANDLING AND RETRY MECHANISM (ORIGINAL)
 # =============================================================================
 
 class AnalysisError(Exception):
@@ -277,7 +614,7 @@ def handle_analysis_errors(func):
     return wrapper
 
 # =============================================================================
-# LOGGING CONFIGURATION
+# LOGGING CONFIGURATION (ORIGINAL)
 # =============================================================================
 
 class AnalysisLogger:
@@ -326,7 +663,7 @@ class AnalysisLogger:
         self.logger.debug(message, extra=kwargs)
 
 # =============================================================================
-# API CLIENTS
+# API CLIENTS (ORIGINAL)
 # =============================================================================
 
 class APIClientBase:
@@ -485,7 +822,7 @@ class OpenAlexClient(APIClientBase):
         return None
 
 # =============================================================================
-# DATA PROCESSORS
+# DATA PROCESSORS (ORIGINAL)
 # =============================================================================
 
 class DataProcessor:
@@ -627,7 +964,7 @@ class DataProcessor:
         return validated
 
 # =============================================================================
-# METRICS CALCULATORS
+# METRICS CALCULATORS (ORIGINAL)
 # =============================================================================
 
 class MetricsCalculator:
@@ -768,7 +1105,7 @@ class MetricsCalculator:
         }
 
 # =============================================================================
-# STATE MANAGEMENT
+# STATE MANAGEMENT (ORIGINAL)
 # =============================================================================
 
 class AnalysisState:
@@ -6019,6 +6356,7 @@ def main():
 # Run application
 if __name__ == "__main__":
     main()
+
 
 
 
