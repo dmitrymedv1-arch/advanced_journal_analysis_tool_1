@@ -6336,18 +6336,14 @@ def main_optimized():
                 "- " + translation_manager.get_text('capability_8') + "\n" +
                 "- **NEW:** Special Analysis metrics (CiteScore & Impact Factor)\n" +
                 "- **NEW:** ROR organization data integration\n" +
-                "- **NEW:** Author ID data (ORCID, Scopus ID, WoS ID)\n" +
-                "- **OPTIMIZED:** Parallel processing and enhanced caching")
+                "- **NEW:** Author ID data (ORCID, Scopus ID, WoS ID)\n")
         
         st.warning("**" + translation_manager.get_text('note') + ":** \n" +
                   "- " + translation_manager.get_text('note_text_1') + "\n" +
                   "- " + translation_manager.get_text('note_text_2') + "\n" +
                   "- " + translation_manager.get_text('note_text_3') + "\n" +
                   "- " + translation_manager.get_text('note_text_4') + "\n" +
-                  "- " + translation_manager.get_text('note_text_5') + "\n" +
-                  "- **NEW:** ROR data processing may increase analysis time for large datasets\n" +
-                  "- **NEW:** Author ID data processing may significantly increase analysis time due to API rate limits\n" +
-                  "- **OPTIMIZED:** Parallel processing reduces overall analysis time by 30-50%")
+                  "- " + translation_manager.get_text('note_text_5') + "\n")
     
     # Main area
     col1, col2 = st.columns([2, 1])
@@ -6425,6 +6421,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
