@@ -5847,7 +5847,9 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
         analyzed_metadata, 
         all_citing_metadata, 
         state, 
-        citation_timing['days_median']
+        citation_timing['days_median'],
+        analyzed_stats,  # передаем статистику
+        citing_stats     # передаем статистику
     )
     
     # Add special analysis metrics if available
@@ -6173,6 +6175,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
