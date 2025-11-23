@@ -6392,7 +6392,7 @@ def main_optimized():
         if 'analysis_duration' in results:
             total_minutes = int(results['analysis_duration'] // 60)
             total_seconds = int(results['analysis_duration'] % 60)
-            st.success(f"⏱️ Total execution time: {total_minutes}m {total_seconds}s")
+            st.success(f"⏱️ Total processing time: {total_minutes}m {total_seconds}s")
         
         # Summary information
         col1, col2, col3, col4 = st.columns(4)
@@ -6425,6 +6425,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
