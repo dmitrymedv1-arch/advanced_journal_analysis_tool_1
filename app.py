@@ -3610,10 +3610,8 @@ def normalize_keywords_data(keywords_data):
     return normalized_data
 
 # === NEW FUNCTION FOR SPECIAL ANALYSIS METRICS ===
-def create_issn_lookup_cache():
+def create_issn_lookup_cache(state):
     """Создает кэш для быстрого поиска ISSN в базах данных"""
-    state = get_analysis_state()
-    
     # Кэш для Scopus (CS.xlsx)
     scopus_issn_cache = set()
     if not state.cs_data.empty:
@@ -6176,5 +6174,6 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
