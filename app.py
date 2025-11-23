@@ -3711,8 +3711,8 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
     print(f"   IF Analyzed: {if_analyzed_start.date()} to {if_analyzed_end.date()}")
     print(f"   IF Citing: {if_citing_start.date()} to {if_citing_end.date()}")
     
-    # Create ISSN lookup cache for fast searching
-    scopus_issn_cache, wos_issn_cache = create_issn_lookup_cache()
+    # Create ISSN lookup cache for fast searching - ИСПРАВЛЕННЫЙ ВЫЗОВ
+    scopus_issn_cache, wos_issn_cache = create_issn_lookup_cache(state)
     print(f"📊 ISSN cache sizes - Scopus: {len(scopus_issn_cache)}, WoS: {len(wos_issn_cache)}")
     
     # Initialize counters
@@ -6174,6 +6174,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
