@@ -5393,14 +5393,10 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             if 'title_keywords' in additional_data:
                 keywords_data = additional_data['title_keywords']
                 normalized_keywords = normalize_keywords_data(keywords_data)
-    
-    if normalized_keywords:
-        keywords_df = pd.DataFrame(normalized_keywords)
-        keywords_df.to_excel(writer, sheet_name='Combined_Title_Keywords', index=False)
                 
                 if normalized_keywords:
                     keywords_df = pd.DataFrame(normalized_keywords)
-                    keywords_df.to_excel(writer, sheet_name='Title_Keywords', index=False)
+                    keywords_df.to_excel(writer, sheet_name='Combined_Title_Keywords', index=False)
 
             # Sheet 17: Citation seasonality - ИСПРАВЛЕНО: правильное имя листа
             if 'citation_seasonality' in additional_data:
@@ -6472,6 +6468,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
