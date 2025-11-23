@@ -5896,6 +5896,9 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     """Optimized version of analyze_journal with parallel processing and caching"""
     global delayer
     delayer = AdaptiveDelayer()
+
+    analysis_start_time = time.time()
+    st.info("⏱️ Starting analysis timer...")
     
     state = get_analysis_state()
     state.analysis_complete = False
@@ -6077,6 +6080,16 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     
     # Report creation
     overall_status.text(translation_manager.get_text('creating_report'))
+
+    analysis_end_time = time.time()
+    analysis_duration = analysis_end_time - analysis_start_time
+    minutes = int(analysis_duration // 60)
+    seconds = int(analysis_duration % 60)
+    
+    st.success(f"✅ Data analysis completed in {minutes}m {seconds}s")
+    st.info("📊 Now generating Excel report...")
+    
+    excel_start_time = time.time()  # Таймер для генерации Excel
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f'journal_analysis_{issn}_{timestamp}.xlsx'
@@ -6116,12 +6129,27 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     
     excel_buffer.seek(0)
     state.excel_buffer = excel_buffer
+
+    excel_end_time = time.time()
+    excel_duration = excel_end_time - excel_start_time
+    total_duration = excel_end_time - analysis_start_time
+    
+    total_minutes = int(total_duration // 60)
+    total_seconds = int(total_duration % 60)
+    excel_minutes = int(excel_duration // 60)
+    excel_seconds = int(excel_duration % 60)
     
     overall_progress.progress(1.0)
     overall_status.text(translation_manager.get_text('analysis_complete'))
+
+    st.success(f"🎉 Complete analysis finished in {total_minutes}m {total_seconds}s")
+    st.info(f"⏱️ Breakdown: Data analysis - {minutes}m {seconds}s, Excel generation - {excel_minutes}m {excel_seconds}s")
     
     # Save results
     state.analysis_results = {
+        'analysis_duration': total_duration,
+        'data_analysis_time': analysis_duration,
+        'excel_generation_time': excel_duration,
         'analyzed_stats': analyzed_stats,
         'citing_stats': citing_stats,
         'enhanced_stats': enhanced_stats,
@@ -6360,6 +6388,11 @@ def main_optimized():
         st.header("📊 " + translation_manager.get_text('analysis_results'))
         
         results = state.analysis_results
+
+        if 'analysis_duration' in results:
+            total_minutes = int(results['analysis_duration'] // 60)
+            total_seconds = int(results['analysis_duration'] % 60)
+            st.success(f"⏱️ Total execution time: {total_minutes}m {total_seconds}s")
         
         # Summary information
         col1, col2, col3, col4 = st.columns(4)
@@ -6392,6 +6425,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
