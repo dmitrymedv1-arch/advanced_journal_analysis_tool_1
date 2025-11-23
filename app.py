@@ -134,7 +134,7 @@ def parallel_metrics_calculation(analyzed_metadata, citing_metadata, state, jour
     """Parallel calculation of all metrics"""
     with ThreadPoolExecutor(max_workers=4) as executor:
         # Basic metrics
-        future_basic = executor.submit(calculate_basic_metrics, analyzed_metadata, citing_metadata)
+        future_basic = executor.submit(enhanced_stats_calculation, analyzed_metadata, citing_metadata, state)
         
         # Fast metrics
         future_fast = executor.submit(calculate_all_fast_metrics, analyzed_metadata, citing_metadata, state, journal_issn)
@@ -222,7 +222,12 @@ def prepare_analyzed_sheet_data(analyzed_data):
     """Prepare data for analyzed articles sheet"""
     # Implementation details...
     return analyzed_data
-
+    
+def calculate_basic_metrics(analyzed_metadata, citing_metadata):
+    """Calculate basic metrics - wrapper for enhanced_stats_calculation"""
+    state = get_analysis_state()
+    return enhanced_stats_calculation(analyzed_metadata, citing_metadata, state)
+    
 def prepare_citing_sheet_data(citing_data):
     """Prepare data for citing works sheet"""
     # Implementation details...
@@ -6142,3 +6147,4 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
