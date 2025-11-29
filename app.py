@@ -3607,15 +3607,17 @@ def normalize_author_name(author_name):
     return f"{surname} {first_initial}".strip()
 
 def normalize_keywords_data(keywords_data):
-    """Нормализация данных ключевых слов для объединенного листа"""
+    """Нормализация данных ключевых слов для объединенного листа с правильной сортировкой"""
     normalized_data = []
     
-    # Нормализация для content words
+    # Получаем общие количества статей
     analyzed_total = keywords_data['analyzed']['total_titles']
     citing_total = keywords_data['citing']['total_titles']
     
-    # Content words
-    for i, (word, analyzed_count) in enumerate(keywords_data['analyzed']['content_words'], 1):
+    # Собираем ВСЕ данные сначала, без предварительных рангов
+    
+    # 1. Content words
+    for word, analyzed_count in keywords_data['analyzed']['content_words']:
         citing_count = next((c for w, c in keywords_data['citing']['content_words'] if w == word), 0)
         
         # Нормализация частот
@@ -3625,7 +3627,6 @@ def normalize_keywords_data(keywords_data):
         ratio = norm_analyzed / norm_citing if norm_citing > 0 else float('inf')
         
         normalized_data.append({
-            'Rank': i,
             'Keyword Type': 'Content',
             'Keyword': word,
             'Norm_Analyzed': round(norm_analyzed, 4),
@@ -3634,8 +3635,8 @@ def normalize_keywords_data(keywords_data):
             'Ratio_Analyzed/Citing': round(ratio, 2)
         })
     
-    # Compound words
-    for i, (word, analyzed_count) in enumerate(keywords_data['analyzed']['compound_words'], 1):
+    # 2. Compound words
+    for word, analyzed_count in keywords_data['analyzed']['compound_words']:
         citing_count = next((c for w, c in keywords_data['citing']['compound_words'] if w == word), 0)
         
         norm_analyzed = analyzed_count / analyzed_total if analyzed_total > 0 else 0
@@ -3644,7 +3645,6 @@ def normalize_keywords_data(keywords_data):
         ratio = norm_analyzed / norm_citing if norm_citing > 0 else float('inf')
         
         normalized_data.append({
-            'Rank': i,
             'Keyword Type': 'Compound',
             'Keyword': word,
             'Norm_Analyzed': round(norm_analyzed, 4),
@@ -3653,8 +3653,8 @@ def normalize_keywords_data(keywords_data):
             'Ratio_Analyzed/Citing': round(ratio, 2)
         })
     
-    # Scientific stopwords
-    for i, (word, analyzed_count) in enumerate(keywords_data['analyzed']['scientific_words'], 1):
+    # 3. Scientific stopwords
+    for word, analyzed_count in keywords_data['analyzed']['scientific_words']:
         citing_count = next((c for w, c in keywords_data['citing']['scientific_words'] if w == word), 0)
         
         norm_analyzed = analyzed_count / analyzed_total if analyzed_total > 0 else 0
@@ -3663,7 +3663,6 @@ def normalize_keywords_data(keywords_data):
         ratio = norm_analyzed / norm_citing if norm_citing > 0 else float('inf')
         
         normalized_data.append({
-            'Rank': i,
             'Keyword Type': 'Scientific',
             'Keyword': word,
             'Norm_Analyzed': round(norm_analyzed, 4),
@@ -3672,10 +3671,10 @@ def normalize_keywords_data(keywords_data):
             'Ratio_Analyzed/Citing': round(ratio, 2)
         })
     
-    # Сортировка по убыванию Norm_Citing
+    # СОРТИРОВКА по Norm_Citing (убывание) - ГЛАВНОЕ ИСПРАВЛЕНИЕ
     normalized_data.sort(key=lambda x: x['Norm_Citing'], reverse=True)
     
-    # Обновляем ранги после сортировки
+    # ДОБАВЛЕНИЕ РАНГОВ только после финальной сортировки
     for i, item in enumerate(normalized_data, 1):
         item['Rank'] = i
     
@@ -6475,6 +6474,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
