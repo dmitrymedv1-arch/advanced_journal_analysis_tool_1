@@ -4531,7 +4531,7 @@ def format_author_name_from_raw(raw_name):
     return f"{family} {given_names}"
 
 def extract_author_data_from_work(work_data, metadata, doi, state):
-    """Извлекает данные автора БЕЗ запросов к ORCID API"""
+    """Извлекает данные автора из работы и метаданных (только ORCID из доступных данных)"""
     authors_data = []
     
     if not work_data:
@@ -4562,11 +4562,11 @@ def extract_author_data_from_work(work_data, metadata, doi, state):
         # Ищем ORCID в маппинге
         orcid_id = None
         for mapped_name, mapped_orcid in orcid_mapping.items():
-            if mapped_name.lower() == name.lower() or raw_name.lower() == mapped_name.lower():
+            if mapped_name.lower() == name.lower():
                 orcid_id = mapped_orcid
                 break
         
-        # НЕ делаем запросы к ORCID API!
+        # НЕ ищем Scopus и WoS ID (для скорости)
         scopus_id = None
         wos_id = None
         
@@ -4656,7 +4656,7 @@ def extract_orcid_from_metadata(metadata):
     return orcid_mapping
     
 def get_work_data_by_doi(doi, state):
-    """Получает данные работы по DOI с кэшированием БЕЗ запросов к ORCID API"""
+    """Получает данные работы по DOI с кэшированием (без запросов к Scopus/WoS)"""
     if not doi:
         return None
     
@@ -4686,7 +4686,7 @@ def get_work_data_by_doi(doi, state):
         state.author_id_cache[cache_key] = None
         return None
     
-    # ИЗМЕНЕНО: НЕ передаем state для запросов к ORCID API
+    # Извлекаем данные авторов (без запросов к внешним API)
     author_data = extract_author_data_from_work(work_data, metadata, doi, state)
     
     # Сохраняем в кэш
@@ -4698,9 +4698,125 @@ def get_work_data_by_doi(doi, state):
     
     state.author_id_cache[cache_key] = result
     return result
+
+def search_orcid_fast(surname, given_name, affiliation=None):
+    """Быстрый поиск ORCID по фамилии, имени и аффилиации - упрощенная версия"""
+    try:
+        if not surname or not surname.strip():
+            return None
+            
+        print(f"🔍 ORCID Search: {surname} {given_name}")
+        
+        # Формируем простой поисковый запрос
+        query = f"family-name:{surname.strip()}"
+        
+        if given_name and given_name.strip():
+            # Берем только первую букву имени для ускорения
+            if len(given_name.strip()) > 0:
+                query += f" AND given-names:{given_name.strip()[0]}"
+        
+        url = f"https://pub.orcid.org/v3.0/search/?q={quote(query)}&rows=5"
+        
+        headers = {
+            'Accept': 'application/json',
+            'User-Agent': 'JournalAnalysisTool/1.0'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            num_results = data.get('num-found', 0)
+            
+            if num_results > 0:
+                # Берем первый результат
+                result = data['result'][0]
+                orcid_id = result.get('orcid-identifier', {}).get('path')
+                
+                if orcid_id:
+                    print(f"✅ Found ORCID: {orcid_id}")
+                    return orcid_id
+            
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ Error searching ORCID for {surname}: {str(e)}")
+        return None
+
+def search_orcid_batch_parallel(authors_without_orcid, state):
+    """Параллельный поиск ORCID для списка авторов без ORCID"""
+    if not authors_without_orcid:
+        return {}
+    
+    print(f"🔍 Starting parallel ORCID search for {len(authors_without_orcid)} authors")
+    
+    # Прогресс-бар
+    orcid_progress = st.progress(0)
+    orcid_status = st.empty()
+    
+    results = {}
+    
+    # Готовим данные для параллельной обработки
+    author_data_list = []
+    for author in authors_without_orcid:
+        surname = author.get('surname', '').strip()
+        given_name = author.get('given_name', '').strip()
+        if surname:  # Только авторы с фамилией
+            author_data_list.append({
+                'full_name': author['full_name'],
+                'surname': surname,
+                'given_name': given_name,
+                'affiliation': author.get('affiliation', '')
+            })
+    
+    total_authors = len(author_data_list)
+    
+    if total_authors == 0:
+        orcid_progress.empty()
+        orcid_status.empty()
+        return {}
+    
+    # Используем 30 параллельных потоков
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        futures = {}
+        
+        for i, author_data in enumerate(author_data_list):
+            future = executor.submit(
+                search_orcid_fast, 
+                author_data['surname'],
+                author_data['given_name'],
+                author_data['affiliation']
+            )
+            futures[future] = author_data
+        
+        completed = 0
+        for future in as_completed(futures):
+            author_data = futures[future]
+            
+            try:
+                orcid_id = future.result()
+                if orcid_id:
+                    results[author_data['full_name']] = orcid_id
+                
+                completed += 1
+                
+                # Обновляем прогресс
+                progress = completed / total_authors
+                orcid_progress.progress(progress)
+                orcid_status.text(f"🔍 ORCID search: {completed}/{total_authors}")
+                
+            except Exception as e:
+                print(f"⚠️ Error processing author {author_data['full_name']}: {e}")
+                completed += 1
+    
+    orcid_progress.empty()
+    orcid_status.empty()
+    
+    print(f"✅ ORCID search completed: found {len(results)} ORCIDs")
+    return results
     
 def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_metadata, state):
-    """Оптимизированное извлечение уникальных авторов БЕЗ запросов к ORCID API"""
+    """Оптимизированное извлечение уникальных авторов с ORCID из метаданных"""
     author_records = {}
     
     def process_batch(metadata_batch, source_type, batch_name=""):
@@ -4714,7 +4830,7 @@ def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_met
             if not doi:
                 continue
             
-            # Получаем данные работы из кэша
+            # Получаем данные работы с кэшированием
             work_info = get_work_data_by_doi(doi, state)
             if not work_info:
                 continue
@@ -4722,7 +4838,7 @@ def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_met
             author_data_list = work_info['author_data']
             
             for author_data in author_data_list:
-                # Используем полное имя как ключ
+                # Используем полное имя как ключ (для ускорения)
                 key = author_data['full_name']
                 
                 if key not in author_records:
@@ -4748,17 +4864,6 @@ def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_met
                     record['all_affiliations'].add(author_data['affiliation'])
                 
                 record['dois'].add(doi)
-                
-                # Обновляем ID если есть в новых данных
-                if author_data['orcid_id'] and not record['orcid_id']:
-                    record['orcid_id'] = author_data['orcid_id']
-                    record['orcid_url'] = author_data['orcid_url']
-                
-                if author_data['scopus_id'] and not record['scopus_id']:
-                    record['scopus_id'] = author_data['scopus_id']
-                
-                if author_data['wos_id'] and not record['wos_id']:
-                    record['wos_id'] = author_data['wos_id']
     
     # Обрабатываем анализируемые статьи
     process_batch(analyzed_metadata, 'analyzed', "analyzed articles")
@@ -4793,22 +4898,10 @@ def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_met
     # Сортируем по количеству DOI (активность)
     author_list.sort(key=lambda x: x['dois_count'], reverse=True)
     
-    # Отладочная информация
-    authors_with_orcid = len([a for a in author_list if a['orcid_id']])
-    authors_with_scopus = len([a for a in author_list if a['scopus_id']])
-    authors_with_wos = len([a for a in author_list if a['wos_id']])
-    
-    print(f"📊 Extracted {len(author_list)} unique authors")
-    print(f"   - With ORCID: {authors_with_orcid}")
-    print(f"   - With Scopus ID: {authors_with_scopus}")
-    print(f"   - With WoS ID: {authors_with_wos}")
-    print(f"   - From analyzed articles: {len([a for a in author_list if 'analyzed' in a['sources']])}")
-    print(f"   - From citing articles: {len([a for a in author_list if 'citing' in a['sources']])}")
-    
     return author_list
     
 def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
-    """Оптимизированное создание листа Author_ID_data БЕЗ запросов к ORCID API"""
+    """Оптимизированное создание листа Author_ID_data с быстрым поиском ORCID"""
     if not state.include_author_id_data:
         return []
     
@@ -4817,13 +4910,13 @@ def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Извлекаем уникальных авторов из метаданных
+    # Шаг 1: Извлекаем уникальных авторов из метаданных (быстро)
+    status_text.text("Step 1/3: Extracting authors from metadata...")
     unique_authors = extract_unique_authors_from_metadata_optimized(
         analyzed_metadata, citing_metadata, state
     )
     
-    progress_bar.progress(0.5)
-    status_text.text(f"📊 Found {len(unique_authors)} unique authors")
+    progress_bar.progress(0.3)
     
     if not unique_authors:
         progress_bar.empty()
@@ -4833,15 +4926,35 @@ def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
     
     # Показываем статистику
     authors_with_orcid = len([a for a in unique_authors if a['orcid_id']])
-    authors_with_scopus = len([a for a in unique_authors if a['scopus_id']])
-    authors_with_wos = len([a for a in unique_authors if a['wos_id']])
+    st.success(f"✅ Step 1 complete: Extracted {len(unique_authors)} unique authors")
+    st.info(f"   - Already have ORCID: {authors_with_orcid}")
+    st.info(f"   - Need ORCID search: {len(unique_authors) - authors_with_orcid}")
     
-    st.success(f"✅ Extracted {len(unique_authors)} unique authors:")
-    st.info(f"   - With ORCID: {authors_with_orcid}")
-    st.info(f"   - With Scopus ID: {authors_with_scopus}")
-    st.info(f"   - With WoS ID: {authors_with_wos}")
+    # Шаг 2: Ищем ORCID для авторов без ORCID
+    if authors_with_orcid < len(unique_authors):
+        status_text.text("Step 2/3: Searching for missing ORCIDs...")
+        
+        # Собираем авторов без ORCID
+        authors_without_orcid = [a for a in unique_authors if not a['orcid_id']]
+        
+        if authors_without_orcid:
+            # Параллельный поиск ORCID
+            found_orcids = search_orcid_batch_parallel(authors_without_orcid, state)
+            
+            # Обновляем авторов с найденными ORCID
+            if found_orcids:
+                for author in unique_authors:
+                    if not author['orcid_id'] and author['full_name'] in found_orcids:
+                        author['orcid_id'] = found_orcids[author['full_name']]
+                        author['orcid_url'] = f"https://orcid.org/{author['orcid_id']}"
+                
+                new_orcids = len(found_orcids)
+                st.success(f"✅ Found ORCID for {new_orcids} additional authors")
     
-    # Создаем финальные данные для Excel
+    progress_bar.progress(0.7)
+    status_text.text("Step 3/3: Preparing data for Excel...")
+    
+    # Шаг 3: Создаем финальные данные для Excel
     final_data = []
     for author in unique_authors:
         # Определяем Sources
@@ -4888,8 +5001,21 @@ def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
     for item in final_data:
         item.pop('DOIs Count', None)
     
+    # Обновляем финальную статистику
+    final_with_orcid = len([a for a in final_data if a['ORCID ID']])
+    
     progress_bar.progress(1.0)
     status_text.text(f"✅ Prepared {len(final_data)} authors for Excel sheet")
+    
+    # Показываем финальную статистику
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Authors", len(final_data))
+    with col2:
+        st.metric("With ORCID", final_with_orcid)
+    with col3:
+        st.metric("ORCID Coverage", f"{(final_with_orcid/len(final_data)*100):.1f}%")
+    
     time.sleep(1)
     progress_bar.empty()
     status_text.empty()
@@ -5796,10 +5922,19 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             # === NEW SHEET: Author ID Data ===
             # Sheet 20: Author_ID_data (NEW)
             if state.include_author_id_data:
-                author_id_data = create_author_id_sheet_optimized(analyzed_data, citing_data, state)
+                # Получаем данные из additional_data
+                author_id_info = additional_data.get('author_id_info', {})
+                author_id_data = author_id_info.get('author_id_data', [])
+                
                 if author_id_data:
                     author_id_df = pd.DataFrame(author_id_data)
                     author_id_df.to_excel(writer, sheet_name='Author_ID_data', index=False)
+                else:
+                    # Если данных нет, создаем пустой лист с сообщением
+                    empty_df = pd.DataFrame({
+                        'Message': ['Author ID data is being processed or not available. Check the analysis logs.']
+                    })
+                    empty_df.to_excel(writer, sheet_name='Author_ID_data', index=False)
 
             # Ensure at least one sheet exists
             if len(writer.sheets) == 0:
@@ -6775,6 +6910,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
