@@ -4530,47 +4530,187 @@ def format_author_name_from_raw(raw_name):
     
     return f"{family} {given_names}"
 
-def extract_clean_authors_from_work(data):
-    """Извлекает авторов из данных OpenAlex в формате Фамилия Имя с аффилиацией"""
-    authors = []
-    for auth in data.get('authorships', []):
+def extract_author_data_from_work(work_data, metadata, doi):
+    """Извлекает полные данные автора из работы и метаданных"""
+    authors_data = []
+    
+    if not work_data:
+        return authors_data
+    
+    # Получаем ORCID из метаданных
+    orcid_mapping = extract_orcid_from_metadata(metadata)
+    
+    # Обрабатываем авторов из OpenAlex
+    for auth in work_data.get('authorships', []):
         raw_name = auth.get('raw_author_name')
         if not raw_name:
             continue
             
+        # Форматируем имя
         name = format_author_name_from_raw(raw_name)
-        
-        # Аффилиация — только название учреждения, без страны
-        aff = "No affiliation"
-        for inst in auth.get('institutions', []):
-            if inst and inst.get('display_name'):
-                aff = inst['display_name']
-                break  # берём только первую
-        
-        # Разделяем имя на фамилию и имя для поиска
         name_parts = name.split()
         surname = name_parts[0] if name_parts else ""
         given_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ""
         
-        authors.append({
-            'name': name,
+        # Аффилиация
+        affiliation = "No affiliation"
+        for inst in auth.get('institutions', []):
+            if inst and inst.get('display_name'):
+                affiliation = inst['display_name']
+                break
+        
+        # Ищем ORCID в маппинге (используем форматированное имя)
+        orcid_id = None
+        if name in orcid_mapping:
+            orcid_id = orcid_mapping[name]
+        else:
+            # Попробуем найти по сырому имени
+            raw_name_clean = raw_name.strip().lower()
+            for mapped_name, mapped_orcid in orcid_mapping.items():
+                if mapped_name.lower() == raw_name_clean:
+                    orcid_id = mapped_orcid
+                    break
+        
+        # Получаем детальную информацию ORCID если найден
+        orcid_url = None
+        scopus_id = None
+        wos_id = None
+        
+        if orcid_id:
+            orcid_url = f"https://orcid.org/{orcid_id}"
+            # Если нужны дополнительные ID, можно вызвать get_detailed_orcid_info
+            # Но это замедлит обработку, лучше делать отдельно при необходимости
+        
+        authors_data.append({
+            'full_name': name,
             'surname': surname,
             'given_name': given_name,
-            'affiliation': aff
+            'affiliation': affiliation,
+            'orcid_id': orcid_id,
+            'orcid_url': orcid_url,
+            'scopus_id': scopus_id,
+            'wos_id': wos_id,
+            'source_doi': doi
         })
     
-    return authors
+    return authors_data
 
-def get_work_by_doi(doi):
-    """Получает данные работы по DOI из OpenAlex"""
-    doi = doi.strip()
-    url = f"https://api.openalex.org/works/https://doi.org/{doi}"
-    try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        return r.json()
-    except:
+def extract_orcid_from_metadata(metadata):
+    """Извлекает ORCID ID для авторов из метаданных Crossref и OpenAlex"""
+    orcid_mapping = {}  # словарь: имя автора -> ORCID ID
+    
+    if not metadata:
+        return orcid_mapping
+    
+    # 1. Проверяем Crossref данные
+    cr_data = metadata.get('crossref')
+    if cr_data:
+        authors = cr_data.get('author', [])
+        for author in authors:
+            if not author:
+                continue
+                
+            # Формируем имя автора
+            family = author.get('family', '').strip()
+            given = author.get('given', '').strip()
+            if not family and not given:
+                continue
+                
+            author_name = f"{given} {family}".strip()
+            
+            # Ищем ORCID в Crossref
+            orcid = None
+            if 'ORCID' in author:
+                orcid = author.get('ORCID')
+            elif 'orcid' in author:
+                orcid = author.get('orcid')
+            
+            if orcid:
+                # Нормализуем ORCID (убираем https://orcid.org/)
+                orcid_clean = str(orcid).strip().lower()
+                if orcid_clean.startswith('https://orcid.org/'):
+                    orcid_clean = orcid_clean[18:]  # Убираем префикс
+                elif orcid_clean.startswith('http://orcid.org/'):
+                    orcid_clean = orcid_clean[17:]
+                
+                orcid_mapping[author_name] = orcid_clean
+                # print(f"✅ Found ORCID in Crossref: {author_name} -> {orcid_clean}")
+    
+    # 2. Проверяем OpenAlex данные
+    oa_data = metadata.get('openalex')
+    if oa_data:
+        authorships = oa_data.get('authorships', [])
+        for authorship in authorships:
+            if not authorship:
+                continue
+                
+            author_info = authorship.get('author', {})
+            if not author_info:
+                continue
+            
+            # Имя автора из OpenAlex
+            author_name = author_info.get('display_name', '').strip()
+            if not author_name:
+                continue
+            
+            # ORCID из OpenAlex
+            orcid_url = author_info.get('orcid')
+            if orcid_url:
+                # Извлекаем ORCID ID из URL
+                orcid_clean = str(orcid_url).strip().lower()
+                if orcid_clean.startswith('https://orcid.org/'):
+                    orcid_clean = orcid_clean[18:]
+                elif orcid_clean.startswith('http://orcid.org/'):
+                    orcid_clean = orcid_clean[17:]
+                
+                orcid_mapping[author_name] = orcid_clean
+                # print(f"✅ Found ORCID in OpenAlex: {author_name} -> {orcid_clean}")
+    
+    return orcid_mapping
+    
+def get_work_data_by_doi(doi, state):
+    """Получает данные работы по DOI с кэшированием"""
+    if not doi:
         return None
+    
+    # Ключ кэша
+    cache_key = f"work_data_{doi}"
+    
+    # Проверяем кэш
+    if cache_key in state.author_id_cache:
+        return state.author_id_cache[cache_key]
+    
+    # Получаем метаданные
+    metadata = state.unified_cache.get(doi)
+    if not metadata:
+        # Если нет в кэше, получаем данные
+        metadata = {
+            'crossref': get_crossref_metadata(doi, state),
+            'openalex': get_openalex_metadata(doi, state)
+        }
+    
+    if not metadata.get('openalex'):
+        # Получаем OpenAlex данные если нет
+        work_data = get_openalex_metadata(doi, state)
+    else:
+        work_data = metadata['openalex']
+    
+    if not work_data:
+        state.author_id_cache[cache_key] = None
+        return None
+    
+    # Извлекаем данные авторов
+    author_data = extract_author_data_from_work(work_data, metadata, doi)
+    
+    # Сохраняем в кэш
+    result = {
+        'work_data': work_data,
+        'metadata': metadata,
+        'author_data': author_data
+    }
+    
+    state.author_id_cache[cache_key] = result
+    return result
 
 def search_orcid_author(surname, given_name, affiliation):
     """Поиск автора в ORCID API по фамилии, имени и аффилиации - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
@@ -4806,132 +4946,209 @@ def process_author_id_data_parallel(author_list, state):
     
     return results
 
-def extract_unique_authors_from_metadata(analyzed_metadata, citing_metadata, state):
-    """Извлекает уникальных авторов из метаданных анализируемых и цитирующих статей с объединением аффилиаций"""
-    author_records = {}  # ключ: "Фамилия Имя", значение: список аффилиаций
+def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_metadata, state):
+    """Оптимизированное извлечение уникальных авторов с ORCID из метаданных"""
+    author_records = {}  # ключ: ORCID ID или полное имя, значение: данные автора
     
-    def process_metadata(metadata_list, source_type):
-        """Обрабатывает метаданные и добавляет авторов в общую коллекцию"""
-        for meta in metadata_list:
-            if not meta or not meta.get('openalex'):
+    def process_batch(metadata_batch, source_type, batch_name=""):
+        """Обрабатывает батч метаданных"""
+        print(f"🔍 Processing {batch_name}: {len(metadata_batch)} articles")
+        
+        for i, meta in enumerate(metadata_batch):
+            if not meta:
                 continue
                 
             doi = meta.get('doi')
             if not doi:
                 continue
-                
-            # Получаем данные работы
-            work_data = get_work_by_doi(doi)
-            if not work_data:
+            
+            # Получаем данные работы с кэшированием
+            work_info = get_work_data_by_doi(doi, state)
+            if not work_info:
                 continue
                 
-            # Извлекаем авторов
-            authors = extract_clean_authors_from_work(work_data)
-            for author in authors:
-                author_name = author['name']
-                affiliation = author['affiliation']
+            author_data_list = work_info['author_data']
+            
+            for author_data in author_data_list:
+                # Используем ORCID как уникальный ключ, если есть
+                key = author_data.get('orcid_id')
+                if not key:
+                    # Если нет ORCID, используем полное имя
+                    key = author_data['full_name']
                 
-                if author_name not in author_records:
-                    author_records[author_name] = {
-                        'surname': author['surname'],
-                        'given_name': author['given_name'],
-                        'affiliations': set(),
-                        'sources': set()
+                if key not in author_records:
+                    author_records[key] = {
+                        'full_name': author_data['full_name'],
+                        'surname': author_data['surname'],
+                        'given_name': author_data['given_name'],
+                        'affiliation': author_data['affiliation'],
+                        'orcid_id': author_data['orcid_id'],
+                        'orcid_url': author_data['orcid_url'],
+                        'scopus_id': author_data['scopus_id'],
+                        'wos_id': author_data['wos_id'],
+                        'sources': set(),
+                        'all_affiliations': set(),
+                        'dois': set()
                     }
                 
-                # Добавляем аффилиацию (если есть)
-                if affiliation and affiliation != "No affiliation":
-                    author_records[author_name]['affiliations'].add(affiliation)
+                # Добавляем информацию
+                record = author_records[key]
+                record['sources'].add(source_type)
                 
-                # Отмечаем источник
-                author_records[author_name]['sources'].add(source_type)
+                if author_data['affiliation'] and author_data['affiliation'] != "No affiliation":
+                    record['all_affiliations'].add(author_data['affiliation'])
+                
+                record['dois'].add(doi)
+                
+                # Если у нас есть ORCID в новых данных, но не было в старых
+                if author_data['orcid_id'] and not record['orcid_id']:
+                    record['orcid_id'] = author_data['orcid_id']
+                    record['orcid_url'] = author_data['orcid_url']
+                
+                # Аналогично для Scopus и WoS ID
     
     # Обрабатываем анализируемые статьи
-    print("🔍 Processing analyzed articles for authors...")
-    process_metadata(analyzed_metadata, 'analyzed')
+    process_batch(analyzed_metadata, 'analyzed', "analyzed articles")
     
     # Обрабатываем цитирующие статьи
-    print("🔍 Processing citing articles for authors...")
-    process_metadata(citing_metadata, 'citing')
+    process_batch(citing_metadata, 'citing', "citing articles")
     
-    # Преобразуем в список с выбором лучшей аффилиации
+    # Преобразуем в список
     author_list = []
     
-    for author_name, data in author_records.items():
-        affiliations_list = list(data['affiliations'])
-        
-        # Выбираем лучшую аффилиацию по приоритету:
-        # 1. Аффилиация из анализируемых статей
-        # 2. Первая аффилиация из цитирующих статей  
-        # 3. "No affiliation" если ничего нет
-        
-        best_affiliation = "No affiliation"
-        if affiliations_list:
-            # Если автор есть в анализируемых статьях, предпочитаем его аффилиации
-            if 'analyzed' in data['sources']:
-                # Ищем аффилиации из анализируемых статей
-                analyzed_affiliations = set()
-                # Для этого нужно проверить исходные данные, но в упрощенной версии берем первую
-                best_affiliation = affiliations_list[0]
-            else:
-                # Только цитирующие статьи - берем первую аффилиацию
-                best_affiliation = affiliations_list[0]
+    for key, data in author_records.items():
+        # Выбираем лучшую аффилиацию
+        affiliations_list = list(data['all_affiliations'])
+        best_affiliation = data['affiliation']
+        if not best_affiliation or best_affiliation == "No affiliation":
+            best_affiliation = affiliations_list[0] if affiliations_list else "No affiliation"
         
         author_list.append({
             'surname': data['surname'],
             'given_name': data['given_name'],
-            'full_name': author_name,
+            'full_name': data['full_name'],
             'affiliation': best_affiliation,
-            'all_affiliations': affiliations_list,  # сохраняем все аффилиации для отладки
-            'sources': list(data['sources'])
+            'orcid_id': data['orcid_id'],
+            'orcid_url': data['orcid_url'],
+            'scopus_id': data['scopus_id'],
+            'wos_id': data['wos_id'],
+            'all_affiliations': list(data['all_affiliations']),
+            'sources': list(data['sources']),
+            'dois_count': len(data['dois'])
         })
     
-    # Сортируем по фамилии для удобства
-    author_list.sort(key=lambda x: x['surname'])
+    # Сортируем по количеству DOI (активность)
+    author_list.sort(key=lambda x: x['dois_count'], reverse=True)
     
-    print(f"📊 Extracted {len(author_list)} unique authors from metadata")
-    print(f"   - With affiliations: {len([a for a in author_list if a['affiliation'] != 'No affiliation'])}")
+    print(f"📊 Extracted {len(author_list)} unique authors")
+    print(f"   - With ORCID: {len([a for a in author_list if a['orcid_id']])}")
     print(f"   - From analyzed articles: {len([a for a in author_list if 'analyzed' in a['sources']])}")
     print(f"   - From citing articles: {len([a for a in author_list if 'citing' in a['sources']])}")
-    print(f"   - From both sources: {len([a for a in author_list if len(a['sources']) > 1])}")
     
     return author_list
 
-def create_author_id_sheet(analyzed_metadata, citing_metadata, state):
-    """Создает лист Author_ID_data с данными об идентификаторах авторов"""
+def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
+    """Оптимизированное создание листа Author_ID_data"""
     if not state.include_author_id_data:
         return []
     
-    # Извлекаем уникальных авторов с объединением данных
-    unique_authors = extract_unique_authors_from_metadata(analyzed_metadata, citing_metadata, state)
+    # Извлекаем уникальных авторов с ORCID из метаданных
+    unique_authors = extract_unique_authors_from_metadata_optimized(
+        analyzed_metadata, citing_metadata, state
+    )
     
     if not unique_authors:
         st.info("No authors found for Author ID data processing.")
         return []
     
     # Показываем статистику
-    st.info(f"📊 Found {len(unique_authors)} unique authors for ID processing")
+    authors_with_orcid = len([a for a in unique_authors if a['orcid_id']])
+    st.info(f"📊 Found {len(unique_authors)} unique authors, {authors_with_orcid} with ORCID")
     
-    # Обрабатываем данные авторов
-    author_id_data = process_author_id_data_parallel(unique_authors, state)
+    # Если у автора нет ORCID, можем попробовать поиск через API
+    # Но только для ограниченного количества
+    if state.include_author_id_data and authors_with_orcid < len(unique_authors):
+        st.info(f"🔍 Will search for ORCID for {len(unique_authors) - authors_with_orcid} authors without ORCID...")
+        
+        # Ограничиваем количество для поиска через API
+        max_api_searches = 50  # Не более 50 запросов
+        authors_to_search = [a for a in unique_authors if not a['orcid_id']][:max_api_searches]
+        
+        if authors_to_search:
+            st.info(f"⚠️ Searching ORCID API for {len(authors_to_search)} authors (limited for performance)")
+            
+            # Прогресс-бар для API поиска
+            api_progress = st.progress(0)
+            api_status = st.empty()
+            
+            for i, author in enumerate(authors_to_search):
+                api_status.text(f"🔍 Searching ORCID for author {i+1}/{len(authors_to_search)}: {author['surname']}")
+                
+                # Поиск через API только если нет ORCID
+                orcid_id, scopus_id, wos_id = search_orcid_author_cached(
+                    author['surname'],
+                    author['given_name'],
+                    author['affiliation'],
+                    state.author_id_cache
+                )
+                
+                # Обновляем данные автора
+                if orcid_id:
+                    # Находим автора в основном списке и обновляем
+                    for idx, a in enumerate(unique_authors):
+                        if a['full_name'] == author['full_name']:
+                            unique_authors[idx]['orcid_id'] = orcid_id
+                            unique_authors[idx]['orcid_url'] = f"https://orcid.org/{orcid_id}"
+                            unique_authors[idx]['scopus_id'] = scopus_id
+                            unique_authors[idx]['wos_id'] = wos_id
+                            break
+                
+                api_progress.progress((i + 1) / len(authors_to_search))
+            
+            api_progress.empty()
+            api_status.empty()
     
-    # Создаем финальный DataFrame с нужными колонками
-    final_columns = [
-        'Full Name', 
-        'Surname', 
-        'Given Name', 
-        'Affiliation', 
-        '.', 
-        'ORCID ID', 
-        'Scopus ID', 
-        'WoS ID'
-    ]
-    
-    # Фильтруем только нужные колонки для итогового листа
+    # Создаем финальные данные для Excel
     final_data = []
-    for record in author_id_data:
-        final_record = {col: record[col] for col in final_columns}
-        final_data.append(final_record)
+    for author in unique_authors:
+        # Определяем Sources
+        sources = author['sources']
+        if 'analyzed' in sources and 'citing' in sources:
+            sources_str = "Both"
+        elif 'analyzed' in sources:
+            sources_str = "Analyzed"
+        else:
+            sources_str = "Citing"
+        
+        # Собираем все аффилиации
+        all_affiliations = author.get('all_affiliations', [])
+        if author['affiliation'] and author['affiliation'] != "No affiliation":
+            if author['affiliation'] not in all_affiliations:
+                all_affiliations = [author['affiliation']] + all_affiliations
+        
+        final_data.append({
+            'Full Name': author['full_name'],
+            'Surname': author['surname'],
+            'Given Name': author['given_name'],
+            'Affiliation': author['affiliation'],
+            '.': '.',
+            'ORCID ID': author['orcid_url'] if author['orcid_url'] else '',
+            'Scopus ID': author['scopus_id'] if author.get('scopus_id') else '',
+            'WoS ID': author['wos_id'] if author.get('wos_id') else '',
+            'Sources': sources_str,
+            'All Affiliations': '; '.join(all_affiliations) if all_affiliations else 'No affiliation',
+            'DOIs Count': author['dois_count']
+        })
+    
+    # Сортируем по наличию ORCID и активности
+    final_data.sort(key=lambda x: (
+        0 if x['ORCID ID'] else 1,  # Сначала с ORCID
+        -x['DOIs Count']            # Затем по активности
+    ))
+    
+    # Убираем служебную колонку
+    for item in final_data:
+        item.pop('DOIs Count', None)
     
     return final_data
 
@@ -5835,7 +6052,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             # === NEW SHEET: Author ID Data ===
             # Sheet 20: Author_ID_data (NEW)
             if state.include_author_id_data:
-                author_id_data = create_author_id_sheet(analyzed_data, citing_data, state)
+                author_id_data = create_author_id_sheet_optimized(analyzed_data, citing_data, state)
                 if author_id_data:
                     author_id_df = pd.DataFrame(author_id_data)
                     author_id_df.to_excel(writer, sheet_name='Author_ID_data', index=False)
@@ -6814,3 +7031,4 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
