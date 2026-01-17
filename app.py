@@ -198,6 +198,9 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
         
         # Potential reviewers - ВСЕГДА выполняем
         future_reviewers = executor.submit(find_potential_reviewers, analyzed_metadata, citing_metadata, [], state)
+
+        # Terms and topics analysis - НОВЫЙ АНАЛИЗ
+        future_terms_topics = executor.submit(collect_terms_topics_statistics, analyzed_metadata, citing_metadata)
         
         # Special analysis metrics (if needed)
         if state.is_special_analysis:
@@ -234,6 +237,12 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
                              'citing': {'content_words': [], 'compound_words': [], 'scientific_words': [], 'total_titles': 0}}
         
         try:
+            terms_topics_result = future_terms_topics.result()  # НОВОЕ
+        except Exception as e:
+            print(f"Warning: Terms and topics analysis failed: {e}")
+            terms_topics_result = {}
+        
+        try:
             seasonality_result = future_seasonality.result()
         except Exception as e:
             print(f"Warning: Citation seasonality analysis failed: {e}")
@@ -246,9 +255,10 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
             reviewers_result = {'potential_reviewers': [], 'total_journal_authors': 0, 'total_overlap_authors': 0, 'total_potential_reviewers': 0}
         
         results = {
-            'title_keywords': keywords_result,  # ИСПРАВЛЕНО: правильное имя ключа
-            'citation_seasonality': seasonality_result,  # ИСПРАВЛЕНО: правильное имя ключа
-            'potential_reviewers': reviewers_result  # ИСПРАВЛЕНО: правильное имя ключа
+            'title_keywords': keywords_result,
+            'citation_seasonality': seasonality_result,
+            'potential_reviewers': reviewers_result,
+            'terms_topics_stats': terms_topics_result
         }
         
         if future_special:
@@ -1845,10 +1855,39 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
     return items
 
 # === 9. DOI Prefix Extraction ===
-def get_doi_prefix(doi):
+def normalize_doi(doi):
+    """Нормализует DOI в единый формат (без https://doi.org/)"""
     if not doi or doi == 'N/A':
+        return ""
+    
+    # Приводим к строке и очищаем
+    doi_str = str(doi).strip().lower()
+    
+    # Удаляем различные префиксы
+    prefixes = [
+        'https://doi.org/',
+        'http://doi.org/',
+        'doi.org/',
+        'doi:'
+    ]
+    
+    for prefix in prefixes:
+        if doi_str.startswith(prefix):
+            doi_str = doi_str[len(prefix):]
+            break
+    
+    return doi_str
+
+def get_doi_prefix(doi):
+    """Извлекает префикс DOI после нормализации"""
+    normalized_doi = normalize_doi(doi)
+    if not normalized_doi:
         return ''
-    return doi.split('/')[0] if '/' in doi else doi[:7]
+    
+    # Извлекаем часть до первого /
+    if '/' in normalized_doi:
+        return normalized_doi.split('/')[0]
+    return normalized_doi
 
 # === 10. Processing with Progress Bar ===
 def process_with_progress(items, func, desc="Processing", unit="items"):
@@ -2013,18 +2052,41 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
             continue
 
         cr = meta.get('crossref')
+        oa = meta.get('openalex')  # ДОБАВЛЕНО: определяем oa здесь
+        
         if cr:
+            # Сначала получаем количество ссылок из Crossref
             refs = cr.get('reference', [])
-            total_refs += len(refs)
-            for ref in refs:
-                ref_doi = ref.get('DOI', '')
-                if ref_doi:
-                    refs_with_doi += 1
-                    if get_doi_prefix(ref_doi) == journal_prefix:
-                        self_cites += 1
+            ref_count_cr = len(refs)
+            
+            # Проверяем OpenAlex если в Crossref 0
+            ref_count = 0
+            if ref_count_cr == 0:
+                if oa:  # Теперь oa определена
+                    ref_count_oa = oa.get('referenced_works_count', 0)
+                    if ref_count_oa > 0:
+                        ref_count = ref_count_oa
+                        # Для данных OpenAlex не можем определить DOI ссылок,
+                        # поэтому считаем все как ссылки без DOI
+                        refs_without_doi += ref_count_oa
+                        # Предупреждение в лог
+                        # print(f"⚠️ Using OpenAlex reference count ({ref_count_oa}) for article")
                 else:
-                    refs_without_doi += 1
-            ref_counts.append(len(refs))
+                    ref_count = 0
+            else:
+                ref_count = ref_count_cr
+                # Анализируем ссылки из Crossref (проверяем DOI)
+                for ref in refs:
+                    ref_doi = ref.get('DOI', '')
+                    if ref_doi:
+                        refs_with_doi += 1
+                        if get_doi_prefix(ref_doi) == journal_prefix:
+                            self_cites += 1
+                    else:
+                        refs_without_doi += 1
+            
+            total_refs += ref_count
+            ref_counts.append(ref_count)
 
             authors = cr.get('author', [])
             num_auth = len(authors)
@@ -2204,6 +2266,41 @@ def enhanced_stats_calculation(analyzed_metadata, citing_metadata, state):
 
 # === 15. Time to First Citation Calculation ===
 def calculate_citation_timing_stats(analyzed_metadata, state):
+    """Calculate time to first citation statistics with proper DOI prefix comparison"""
+    
+    def normalize_doi(doi):
+        """Normalize DOI to consistent format (without https://doi.org/)"""
+        if not doi or doi == 'N/A':
+            return ""
+        
+        # Convert to string and clean
+        doi_str = str(doi).strip().lower()
+        
+        # Remove various DOI prefixes
+        prefixes = [
+            'https://doi.org/',
+            'http://doi.org/',
+            'doi.org/',
+            'doi:'
+        ]
+        
+        for prefix in prefixes:
+            if doi_str.startswith(prefix):
+                doi_str = doi_str[len(prefix):]
+                break
+        
+        return doi_str
+    
+    def get_doi_prefix_from_normalized(doi):
+        """Extract DOI prefix from normalized DOI"""
+        if not doi:
+            return ''
+        
+        # Extract part before first /
+        if '/' in doi:
+            return doi.split('/')[0]
+        return doi
+    
     all_days_to_first_citation = []
     citation_timing_stats = {}
     first_citation_details = []
@@ -2242,36 +2339,62 @@ def calculate_citation_timing_stats(analyzed_metadata, state):
                 first_citation_date, first_citing_doi = min(citation_dates, key=lambda x: x[0])
                 days_to_first_citation = (first_citation_date - analyzed_date).days
                 
-                # === ИСКЛЮЧЕНИЕ РЕДАКТОРСКИХ ЗАМЕТОК ===
-                # Проверяем, не является ли цитирующая статья редакторской заметкой
-                # (имеет тот же DOI-префикс и ту же дату публикации)
-                analyzed_prefix = get_doi_prefix(analyzed_doi)
-                citing_prefix = get_doi_prefix(first_citing_doi)
+                # === FIXED DOI PREFIX COMPARISON ===
+                # Normalize DOIs before comparison
+                analyzed_doi_normalized = normalize_doi(analyzed_doi)
+                citing_doi_normalized = normalize_doi(first_citing_doi)
                 
-                same_prefix = (analyzed_prefix == citing_prefix)
+                # Extract prefixes from normalized DOIs
+                analyzed_prefix = get_doi_prefix_from_normalized(analyzed_doi_normalized)
+                citing_prefix = get_doi_prefix_from_normalized(citing_doi_normalized)
+                
+                # Check if prefixes match (excluding empty prefixes)
+                same_prefix = (analyzed_prefix == citing_prefix and analyzed_prefix != '')
                 same_date = (analyzed_date.date() == first_citation_date.date())
+                is_editorial_note = same_prefix and same_date
                 
-                # Исключаем записи с тем же префиксом и той же датой (вероятно редакторские заметки)
-                if not (same_prefix and same_date) and days_to_first_citation >= 0:
-                    all_days_to_first_citation.append(days_to_first_citation)
+                if days_to_first_citation >= 0:
+                    # Always save all details for Excel reporting
                     first_citation_details.append({
                         'analyzed_doi': analyzed_doi,
+                        'analyzed_doi_normalized': analyzed_doi_normalized,
                         'citing_doi': first_citing_doi,
+                        'citing_doi_normalized': citing_doi_normalized,
                         'analyzed_date': analyzed_date,
                         'first_citation_date': first_citation_date,
                         'days_to_first_citation': days_to_first_citation,
                         'same_prefix': same_prefix,
-                        'same_date': same_date
+                        'same_date': same_date,
+                        'is_editorial_note': is_editorial_note,
+                        'analyzed_prefix': analyzed_prefix,
+                        'citing_prefix': citing_prefix
                     })
+                    
+                    # Exclude editorial notes from statistical calculations
+                    if not is_editorial_note:
+                        all_days_to_first_citation.append(days_to_first_citation)
+                    else:
+                        print(f"⚠️ Editorial note excluded: {analyzed_doi} -> {first_citing_doi} (same prefix: {analyzed_prefix}, same date: {same_date})")
     
     if all_days_to_first_citation:
         citation_timing_stats = {
+            # Statistics WITHOUT editorial notes (for Citing_Stats)
             'min_days_to_first_citation': min(all_days_to_first_citation),
             'max_days_to_first_citation': max(all_days_to_first_citation),
             'mean_days_to_first_citation': np.mean(all_days_to_first_citation),
             'median_days_to_first_citation': np.median(all_days_to_first_citation),
             'articles_with_citation_timing_data': len(all_days_to_first_citation),
-            'first_citation_details': first_citation_details
+            
+            # All details (for Excel)
+            'first_citation_details': first_citation_details,
+            
+            # Statistics for ALL data (including editorial notes)
+            'all_data_stats': {
+                'total_citations_analyzed': len(first_citation_details),
+                'editorial_notes_count': len([d for d in first_citation_details if d.get('is_editorial_note', False)]),
+                'non_editorial_citations': len(all_days_to_first_citation),
+                'articles_with_any_citation': len(set(detail['analyzed_doi'] for detail in first_citation_details))
+            }
         }
     else:
         citation_timing_stats = {
@@ -2280,7 +2403,13 @@ def calculate_citation_timing_stats(analyzed_metadata, state):
             'mean_days_to_first_citation': 0,
             'median_days_to_first_citation': 0,
             'articles_with_citation_timing_data': 0,
-            'first_citation_details': []
+            'first_citation_details': [],
+            'all_data_stats': {
+                'total_citations_analyzed': 0,
+                'editorial_notes_count': 0,
+                'non_editorial_citations': 0,
+                'articles_with_any_citation': 0
+            }
         }
     
     return citation_timing_stats
@@ -3607,17 +3736,15 @@ def normalize_author_name(author_name):
     return f"{surname} {first_initial}".strip()
 
 def normalize_keywords_data(keywords_data):
-    """Нормализация данных ключевых слов для объединенного листа с правильной сортировкой"""
+    """Нормализация данных ключевых слов для объединенного листа"""
     normalized_data = []
     
-    # Получаем общие количества статей
+    # Нормализация для content words
     analyzed_total = keywords_data['analyzed']['total_titles']
     citing_total = keywords_data['citing']['total_titles']
     
-    # Собираем ВСЕ данные сначала, без предварительных рангов
-    
-    # 1. Content words
-    for word, analyzed_count in keywords_data['analyzed']['content_words']:
+    # Content words
+    for i, (word, analyzed_count) in enumerate(keywords_data['analyzed']['content_words'], 1):
         citing_count = next((c for w, c in keywords_data['citing']['content_words'] if w == word), 0)
         
         # Нормализация частот
@@ -3627,6 +3754,7 @@ def normalize_keywords_data(keywords_data):
         ratio = norm_analyzed / norm_citing if norm_citing > 0 else float('inf')
         
         normalized_data.append({
+            'Rank': i,
             'Keyword Type': 'Content',
             'Keyword': word,
             'Norm_Analyzed': round(norm_analyzed, 4),
@@ -3635,8 +3763,8 @@ def normalize_keywords_data(keywords_data):
             'Ratio_Analyzed/Citing': round(ratio, 2)
         })
     
-    # 2. Compound words
-    for word, analyzed_count in keywords_data['analyzed']['compound_words']:
+    # Compound words
+    for i, (word, analyzed_count) in enumerate(keywords_data['analyzed']['compound_words'], 1):
         citing_count = next((c for w, c in keywords_data['citing']['compound_words'] if w == word), 0)
         
         norm_analyzed = analyzed_count / analyzed_total if analyzed_total > 0 else 0
@@ -3645,6 +3773,7 @@ def normalize_keywords_data(keywords_data):
         ratio = norm_analyzed / norm_citing if norm_citing > 0 else float('inf')
         
         normalized_data.append({
+            'Rank': i,
             'Keyword Type': 'Compound',
             'Keyword': word,
             'Norm_Analyzed': round(norm_analyzed, 4),
@@ -3653,8 +3782,8 @@ def normalize_keywords_data(keywords_data):
             'Ratio_Analyzed/Citing': round(ratio, 2)
         })
     
-    # 3. Scientific stopwords
-    for word, analyzed_count in keywords_data['analyzed']['scientific_words']:
+    # Scientific stopwords
+    for i, (word, analyzed_count) in enumerate(keywords_data['analyzed']['scientific_words'], 1):
         citing_count = next((c for w, c in keywords_data['citing']['scientific_words'] if w == word), 0)
         
         norm_analyzed = analyzed_count / analyzed_total if analyzed_total > 0 else 0
@@ -3663,6 +3792,7 @@ def normalize_keywords_data(keywords_data):
         ratio = norm_analyzed / norm_citing if norm_citing > 0 else float('inf')
         
         normalized_data.append({
+            'Rank': i,
             'Keyword Type': 'Scientific',
             'Keyword': word,
             'Norm_Analyzed': round(norm_analyzed, 4),
@@ -3671,10 +3801,10 @@ def normalize_keywords_data(keywords_data):
             'Ratio_Analyzed/Citing': round(ratio, 2)
         })
     
-    # СОРТИРОВКА по Norm_Citing (убывание) - ГЛАВНОЕ ИСПРАВЛЕНИЕ
+    # Сортировка по убыванию Norm_Citing
     normalized_data.sort(key=lambda x: x['Norm_Citing'], reverse=True)
     
-    # ДОБАВЛЕНИЕ РАНГОВ только после финальной сортировки
+    # Обновляем ранги после сортировки
     for i, item in enumerate(normalized_data, 1):
         item['Rank'] = i
     
@@ -4859,6 +4989,222 @@ def precompute_excel_data(analyzed_data, citing_data, analyzed_stats, citing_sta
         'citing_articles_usage': citing_articles_usage
     }
 
+def collect_terms_topics_statistics(analyzed_metadata, citing_metadata):
+    """Собирает расширенную статистику по терминам и темам с полной иерархией"""
+    
+    # Словарь для хранения статистики по терминам
+    terms_stats = {}
+    
+    def _extract_topics_info(openalex_data):
+        """Извлекает topic, subfield, field, domain и concepts из данных OpenAlex"""
+        topics_info = {
+            'topic': '',
+            'subfield': '',
+            'field': '',
+            'domain': '',
+            'concepts': []
+        }
+        
+        if not openalex_data:
+            return topics_info
+        
+        try:
+            # Извлекаем концепты
+            concepts = openalex_data.get('concepts', [])
+            concept_names = []
+            
+            for concept in concepts:
+                if isinstance(concept, dict):
+                    display_name = concept.get('display_name', '')
+                    score = concept.get('score', 0)
+                    if display_name:
+                        concept_names.append((display_name, score))
+            
+            # Сортируем концепты по score (убывание)
+            concept_names.sort(key=lambda x: x[1], reverse=True)
+            topics_info['concepts'] = [name for name, score in concept_names]
+            
+            # Используем первый концепт как topic
+            if concept_names:
+                topics_info['topic'] = concept_names[0][0] if concept_names else ''
+                
+                # Для subfield, field и domain используем следующие концепты
+                if len(concept_names) > 1:
+                    topics_info['subfield'] = concept_names[1][0] if len(concept_names) > 1 else ''
+                if len(concept_names) > 2:
+                    topics_info['field'] = concept_names[2][0] if len(concept_names) > 2 else ''
+                if len(concept_names) > 3:
+                    topics_info['domain'] = concept_names[3][0] if len(concept_names) > 3 else ''
+            
+            # Проверяем специальные поля OpenAlex для тем
+            # (В реальных данных OpenAlex могут быть дополнительные поля)
+            
+            # Проверяем поля topics, subfield, field, domain если они есть
+            if 'topics' in openalex_data and openalex_data['topics']:
+                topics = openalex_data['topics']
+                if isinstance(topics, list) and topics:
+                    if isinstance(topics[0], dict):
+                        topics_info['topic'] = topics[0].get('display_name', topics_info['topic'])
+            
+            # Можно добавить проверку других полей, если они есть в ваших данных
+            
+        except Exception as e:
+            print(f"⚠️ Topics info extraction error: {e}")
+        
+        return topics_info
+    
+    # Функция для обработки одной статьи
+    def process_article(metadata, article_type, publication_year):
+        if not metadata or not metadata.get('openalex'):
+            return
+        
+        oa = metadata['openalex']
+        
+        # Извлекаем полную иерархию тем
+        topics_info = _extract_topics_info(oa)
+        
+        # Список всех терминов с их типами
+        all_terms = [
+            (topics_info['topic'], 'Topic'),
+            (topics_info['subfield'], 'Subfield'),
+            (topics_info['field'], 'Field'),
+            (topics_info['domain'], 'Domain')
+        ]
+        
+        # Добавляем концепты
+        for concept in topics_info['concepts'][:10]:  # Берем топ-10 концептов
+            if concept:  # Пропускаем пустые
+                all_terms.append((concept, 'Concept'))
+        
+        # Обрабатываем каждый термин
+        for term_name, term_type in all_terms:
+            if not term_name:  # Пропускаем пустые термины
+                continue
+            
+            # Инициализируем запись для термина, если её нет
+            if term_name not in terms_stats:
+                terms_stats[term_name] = {
+                    'type': term_type,
+                    'analyzed_count': 0,
+                    'citing_count': 0,
+                    'analyzed_norm': 0,
+                    'citing_norm': 0,
+                    'years': [],
+                    'first_year': None,
+                    'peak_year': None,
+                    'peak_count': 0,
+                    'recent_5_years': 0
+                }
+            
+            # Обновляем счетчики в зависимости от типа статьи
+            if article_type == 'analyzed':
+                terms_stats[term_name]['analyzed_count'] += 1
+                # Для нормализации используем вес (для концептов) или 1 для тем
+                if term_type == 'Concept':
+                    # Ищем score концепта в исходных данных
+                    concepts = oa.get('concepts', [])
+                    for concept in concepts:
+                        if concept.get('display_name') == term_name:
+                            terms_stats[term_name]['analyzed_norm'] += concept.get('score', 1)
+                            break
+                else:
+                    terms_stats[term_name]['analyzed_norm'] += 1
+                    
+            elif article_type == 'citing':
+                terms_stats[term_name]['citing_count'] += 1
+                if term_type == 'Concept':
+                    concepts = oa.get('concepts', [])
+                    for concept in concepts:
+                        if concept.get('display_name') == term_name:
+                            terms_stats[term_name]['citing_norm'] += concept.get('score', 1)
+                            break
+                else:
+                    terms_stats[term_name]['citing_norm'] += 1
+            
+            # Сохраняем год публикации
+            if publication_year:
+                terms_stats[term_name]['years'].append(publication_year)
+                
+                # Обновляем первый год
+                if terms_stats[term_name]['first_year'] is None or publication_year < terms_stats[term_name]['first_year']:
+                    terms_stats[term_name]['first_year'] = publication_year
+                
+                # Определяем пиковый год
+                year_count = terms_stats[term_name]['years'].count(publication_year)
+                if year_count > terms_stats[term_name]['peak_count']:
+                    terms_stats[term_name]['peak_year'] = publication_year
+                    terms_stats[term_name]['peak_count'] = year_count
+                
+                # Считаем публикации за последние 5 лет
+                current_year = datetime.now().year
+                if publication_year >= current_year - 5:
+                    terms_stats[term_name]['recent_5_years'] += 1
+    
+    # Обрабатываем анализируемые статьи
+    print(f"🔍 Processing terms/topics from analyzed articles: {len(analyzed_metadata)}")
+    analyzed_with_concepts = 0
+    
+    for article in analyzed_metadata:
+        if article and article.get('openalex'):
+            oa = article['openalex']
+            if oa.get('concepts'):
+                analyzed_with_concepts += 1
+            # Извлекаем год публикации
+            date_parts = article['crossref'].get('published', {}).get('date-parts', [[]])[0]
+            year = date_parts[0] if date_parts and len(date_parts) > 0 else None
+            
+            process_article(article, 'analyzed', year)
+    
+    # Обрабатываем цитирующие статьи
+    print(f"🔍 Processing terms/topics from citing articles: {len(citing_metadata)}")
+    citing_with_concepts = 0
+    
+    for article in citing_metadata:
+        if article and article.get('openalex'):
+            oa = article['openalex']
+            if oa.get('concepts'):
+                citing_with_concepts += 1
+            date_parts = article['crossref'].get('published', {}).get('date-parts', [[]])[0]
+            year = date_parts[0] if date_parts and len(date_parts) > 0 else None
+            
+            process_article(article, 'citing', year)
+    
+    # Рассчитываем normalized counts
+    print(f"📊 Terms/topics statistics: {len(terms_stats)} unique terms found")
+    print(f"   Analyzed articles with concepts: {analyzed_with_concepts}/{len(analyzed_metadata)}")
+    print(f"   Citing articles with concepts: {citing_with_concepts}/{len(citing_metadata)}")
+    
+    for term_name, term in terms_stats.items():
+        # Нормализованные счетчики
+        if analyzed_with_concepts > 0:
+            term['analyzed_norm_count'] = term['analyzed_norm'] / analyzed_with_concepts if term['analyzed_norm'] > 0 else 0
+        else:
+            term['analyzed_norm_count'] = 0
+            
+        if citing_with_concepts > 0:
+            term['citing_norm_count'] = term['citing_norm'] / citing_with_concepts if term['citing_norm'] > 0 else 0
+        else:
+            term['citing_norm_count'] = 0
+        
+        # Общий нормализованный счет
+        term['total_norm_count'] = term['analyzed_norm_count'] + term['citing_norm_count']
+        
+        # Очищаем временные поля для экономии памяти
+        term.pop('years', None)
+        term.pop('peak_count', None)
+        term.pop('analyzed_norm', None)
+        term.pop('citing_norm', None)
+    
+    # Анализируем распределение по типам
+    type_distribution = {}
+    for term_name, term in terms_stats.items():
+        term_type = term.get('type', 'Unknown')
+        type_distribution[term_type] = type_distribution.get(term_type, 0) + 1
+    
+    print(f"📊 Type distribution: {type_distribution}")
+    
+    return terms_stats
+    
 def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
     """Create enhanced Excel report with error handling for large data"""
     
@@ -4926,7 +5272,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     'Journal': safe_convert(journal_info['journal_name'])[:100],  # ИЗ КЭША
                     'Publisher': safe_convert(journal_info['publisher'])[:100],  # ИЗ КЭША
                     'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],  # ИЗ КЭША
-                    'Reference_Count': safe_convert(cr.get('reference-count', 0)),
+                    'Reference_Count': safe_convert(cr.get('reference-count', 0) or (precomputed['oa'].get('referenced_works_count', 0) if precomputed['oa'] else 0)),
                     'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
                     'Citations_OpenAlex': safe_convert(precomputed['oa'].get('cited_by_count', 0)) if precomputed['oa'] else 0,
                     'Author_Count': safe_convert(len(cr.get('author', []))),
@@ -4939,39 +5285,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             state = get_analysis_state()
             special_metrics = additional_data.get('special_analysis_metrics', {})
             analyzed_articles_usage = special_metrics.get('debug_info', {}).get('analyzed_articles_usage', {})
-            
-            for i, item in enumerate(analyzed_data):
-                if i >= MAX_ROWS:
-                    break
-                if item and item.get('crossref'):
-                    cr = item['crossref']
-                    oa = item.get('openalex', {})
-                    authors_list, affiliations_list, countries_list = extract_affiliations_and_countries(oa)
-                    journal_info = extract_journal_info(item)
-                    
-                    analyzed_doi = cr.get('DOI', '')
-                    usage_info = analyzed_articles_usage.get(analyzed_doi, {})
-                    
-                    analyzed_list.append({
-                        'DOI': safe_convert(cr.get('DOI', ''))[:100],
-                        'Title': (cr.get('title', [''])[0] if cr.get('title') else 'No title')[:200],
-                        'Authors_Crossref': safe_join([f"{a.get('given', '')} {a.get('family', '')}".strip() for a in cr.get('author', []) if a.get('given') or a.get('family')])[:300],
-                        'Authors_OpenAlex': safe_join(authors_list)[:300],
-                        'Affiliations': safe_join(affiliations_list)[:500],
-                        'Countries': safe_join(countries_list)[:100],
-                        'Publication_Year': safe_convert(cr.get('published', {}).get('date-parts', [[0]])[0][0]),
-                        'Journal': safe_convert(journal_info['journal_name'])[:100],
-                        'Publisher': safe_convert(journal_info['publisher'])[:100],
-                        'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],
-                        'Reference_Count': safe_convert(cr.get('reference-count', 0)),
-                        'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
-                        'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
-                        'Author_Count': safe_convert(len(cr.get('author', []))),
-                        'Work_Type': safe_convert(cr.get('type', ''))[:50],
-                        'Used for SC': '×' if usage_info.get('used_for_sc') else '',
-                        'Used for IF': '×' if usage_info.get('used_for_if') else ''
-                    })
-            
+                        
             if analyzed_list:
                 analyzed_df = pd.DataFrame(analyzed_list)
                 analyzed_df.to_excel(writer, sheet_name='Analyzed_Articles', index=False)
@@ -5015,7 +5329,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Journal': safe_convert(journal_info['journal_name'])[:100],
                         'Publisher': safe_convert(journal_info['publisher'])[:100],
                         'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],
-                        'Reference_Count': safe_convert(cr.get('reference-count', 0)),
+                        'Reference_Count': safe_convert(cr.get('reference-count', 0) or (oa.get('referenced_works_count', 0) if oa else 0)),
                         'Citations_Crossref': safe_convert(cr.get('is-referenced-by-count', 0)),
                         'Citations_OpenAlex': safe_convert(oa.get('cited_by_count', 0)) if oa else 0,
                         'Author_Count': safe_convert(len(cr.get('author', []))),
@@ -5047,22 +5361,27 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 overlap_df = pd.DataFrame(overlap_list)
                 overlap_df.to_excel(writer, sheet_name='Work_Overlaps', index=False)
 
-            # Sheet 4: Time to first citation (С ИСКЛЮЧЕНИЕМ РЕДАКТОРСКИХ ЗАМЕТОК)
+            # Sheet 4: Time to first citation (WITH EDITORIAL NOTES EXCLUDED)
             first_citation_list = []
             for detail in citation_timing.get('first_citation_details', []):
-                # === ИСКЛЮЧЕНИЕ РЕДАКТОРСКИХ ЗАМЕТОК ===
-                # Не включаем записи с тем же префиксом и той же датой
-                if detail.get('same_prefix', False) and detail.get('same_date', False):
+                # === EXCLUDE EDITORIAL NOTES ===
+                # Skip records that are editorial notes (same prefix AND same date)
+                if detail.get('is_editorial_note', False):
                     continue
                     
+                # Normalize DOIs for consistent display
+                analyzed_doi_normalized = normalize_doi(detail['analyzed_doi'])
+                citing_doi_normalized = normalize_doi(detail['citing_doi'])
+                
                 first_citation_list.append({
-                    'Analyzed_DOI': safe_convert(detail['analyzed_doi'])[:100],
-                    'First_Citing_DOI': safe_convert(detail['citing_doi'])[:100],
+                    'Analyzed_DOI': safe_convert(analyzed_doi_normalized)[:100],
+                    'First_Citing_DOI': safe_convert(citing_doi_normalized)[:100],
                     'Publication_Date': detail['analyzed_date'].strftime('%Y-%m-%d') if detail['analyzed_date'] else 'N/A',
                     'First_Citation_Date': detail['first_citation_date'].strftime('%Y-%m-%d') if detail['first_citation_date'] else 'N/A',
                     'Days_to_First_Citation': safe_convert(detail['days_to_first_citation']),
                     'Same_DOI_Prefix': detail.get('same_prefix', False),
-                    'Same_Publication_Date': detail.get('same_date', False)
+                    'Same_Publication_Date': detail.get('same_date', False),
+                    'Editorial_Note_Excluded': detail.get('is_editorial_note', False)
                 })
             
             if first_citation_list:
@@ -5385,14 +5704,35 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             fast_metrics_df = pd.DataFrame(fast_metrics_data)
             fast_metrics_df.to_excel(writer, sheet_name='Fast_Metrics', index=False)
 
-            # Sheet 15: Top concepts (NEW) - РАСШИРЕНО ДО 10 ТЕРМИНОВ
-            if fast_metrics.get('top_concepts'):
-                top_concepts_data = {
-                    'Concept': [safe_convert(concept[0]) for concept in fast_metrics['top_concepts']],
-                    'Mentions_Count': [safe_convert(concept[1]) for concept in fast_metrics['top_concepts']]
-                }
-                top_concepts_df = pd.DataFrame(top_concepts_data)
-                top_concepts_df.to_excel(writer, sheet_name='Top_Concepts', index=False)
+            # Sheet 15: Terms and Topics Analysis
+            if 'terms_topics_stats' in additional_data and additional_data['terms_topics_stats']:
+                terms_stats = additional_data['terms_topics_stats']
+                
+                terms_topics_data = []
+                current_year = datetime.now().year
+                
+                for term_name, stats in terms_stats.items():
+                    terms_topics_data.append({
+                        'Term': safe_convert(term_name)[:200],
+                        'Type': safe_convert(stats.get('type', 'Concept')),
+                        'Analyzed count': safe_convert(stats.get('analyzed_count', 0)),
+                        'Citing Count': safe_convert(stats.get('citing_count', 0)),
+                        'Analyzed norm count': round(stats.get('analyzed_norm_count', 0), 4),
+                        'Citing norm Count': round(stats.get('citing_norm_count', 0), 4),
+                        'Total norm count': round(stats.get('total_norm_count', 0), 4),
+                        'First_Year': safe_convert(stats.get('first_year', 'N/A')),
+                        'Peak_Year': safe_convert(stats.get('peak_year', 'N/A')),
+                        'Recent_5_Years_Count': safe_convert(stats.get('recent_5_years', 0))
+                    })
+                
+                # Сортируем по Total norm count
+                terms_topics_data.sort(key=lambda x: x['Total norm count'], reverse=True)
+                
+                # Ограничиваем количество записей
+                terms_topics_data = terms_topics_data[:100]
+                
+                terms_topics_df = pd.DataFrame(terms_topics_data)
+                terms_topics_df.to_excel(writer, sheet_name='Terms_and_Topics', index=False)
 
             # === НОВЫЙ ЛИСТ: Объединенный анализ ключевых слов в названиях ===
             # Sheet 16: Combined Title Keywords (NEW) - ИСПРАВЛЕНО: правильное имя листа
@@ -6474,19 +6814,3 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
