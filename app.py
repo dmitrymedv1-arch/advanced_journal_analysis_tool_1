@@ -5066,20 +5066,19 @@ def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
     st.info(f"📊 Found {len(unique_authors)} unique authors, {authors_with_orcid} with ORCID")
     
     # Если у автора нет ORCID, можем попробовать поиск через API
-    # Но только для ограниченного количества
+    # ИСПРАВЛЕНО: убираем ограничение в 50 запросов
     if state.include_author_id_data and authors_with_orcid < len(unique_authors):
-        st.info(f"🔍 Will search for ORCID for {len(unique_authors) - authors_with_orcid} authors without ORCID...")
-        
-        # Ограничиваем количество для поиска через API
-        max_api_searches = 50  # Не более 50 запросов
-        authors_to_search = [a for a in unique_authors if not a['orcid_id']][:max_api_searches]
+        authors_to_search = [a for a in unique_authors if not a['orcid_id']]
         
         if authors_to_search:
-            st.info(f"⚠️ Searching ORCID API for {len(authors_to_search)} authors (limited for performance)")
+            st.info(f"🔍 Searching ORCID API for {len(authors_to_search)} authors without ORCID...")
             
             # Прогресс-бар для API поиска
             api_progress = st.progress(0)
             api_status = st.empty()
+            
+            # Добавляем задержку между запросами чтобы избежать rate limiting
+            delay_between_requests = 0.5  # 500ms между запросами
             
             for i, author in enumerate(authors_to_search):
                 api_status.text(f"🔍 Searching ORCID for author {i+1}/{len(authors_to_search)}: {author['surname']}")
@@ -5104,9 +5103,17 @@ def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
                             break
                 
                 api_progress.progress((i + 1) / len(authors_to_search))
+                
+                # Небольшая задержка чтобы избежать блокировки API
+                time.sleep(delay_between_requests)
             
             api_progress.empty()
             api_status.empty()
+            
+            # Обновляем статистику
+            final_with_orcid = len([a for a in unique_authors if a['orcid_id']])
+            newly_found = final_with_orcid - authors_with_orcid
+            st.success(f"✅ Found ORCID for {newly_found} additional authors (total: {final_with_orcid}/{len(unique_authors)})")
     
     # Создаем финальные данные для Excel
     final_data = []
@@ -7031,4 +7038,5 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
