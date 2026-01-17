@@ -4530,8 +4530,8 @@ def format_author_name_from_raw(raw_name):
     
     return f"{family} {given_names}"
 
-def extract_author_data_from_work(work_data, metadata, doi):
-    """Извлекает полные данные автора из работы и метаданных"""
+def extract_author_data_from_work(work_data, metadata, doi, state):
+    """Извлекает полные данные автора из работы и метаданных с получением Scopus/WoS ID"""
     authors_data = []
     
     if not work_data:
@@ -4561,6 +4561,9 @@ def extract_author_data_from_work(work_data, metadata, doi):
         
         # Ищем ORCID в маппинге (используем форматированное имя)
         orcid_id = None
+        scopus_id = None
+        wos_id = None
+        
         if name in orcid_mapping:
             orcid_id = orcid_mapping[name]
         else:
@@ -4571,15 +4574,14 @@ def extract_author_data_from_work(work_data, metadata, doi):
                     orcid_id = mapped_orcid
                     break
         
-        # Получаем детальную информацию ORCID если найден
-        orcid_url = None
-        scopus_id = None
-        wos_id = None
-        
+        # ЕСЛИ НАШЛИ ORCID - ПОЛУЧАЕМ ДЕТАЛЬНУЮ ИНФОРМАЦИЮ!
         if orcid_id:
-            orcid_url = f"https://orcid.org/{orcid_id}"
-            # Если нужны дополнительные ID, можно вызвать get_detailed_orcid_info
-            # Но это замедлит обработку, лучше делать отдельно при необходимости
+            # Получаем детальную информацию из ORCID профиля
+            orcid_url, scopus_id, wos_id = get_orcid_detailed_info_cached(orcid_id, state)
+            
+            # Если не получилось через get_detailed_orcid_info, пытаемся другим способом
+            if not scopus_id or not wos_id:
+                scopus_id, wos_id = extract_additional_ids_from_orcid(orcid_id, state)
         
         authors_data.append({
             'full_name': name,
@@ -4587,7 +4589,7 @@ def extract_author_data_from_work(work_data, metadata, doi):
             'given_name': given_name,
             'affiliation': affiliation,
             'orcid_id': orcid_id,
-            'orcid_url': orcid_url,
+            'orcid_url': f"https://orcid.org/{orcid_id}" if orcid_id else None,
             'scopus_id': scopus_id,
             'wos_id': wos_id,
             'source_doi': doi
@@ -4699,8 +4701,8 @@ def get_work_data_by_doi(doi, state):
         state.author_id_cache[cache_key] = None
         return None
     
-    # Извлекаем данные авторов
-    author_data = extract_author_data_from_work(work_data, metadata, doi)
+    # ИЗМЕНЕНО: передаем state для получения детальной информации ORCID
+    author_data = extract_author_data_from_work(work_data, metadata, doi, state)
     
     # Сохраняем в кэш
     result = {
@@ -4820,6 +4822,90 @@ def get_detailed_orcid_info(orcid_id):
     except Exception as e:
         print(f"🚨 Error getting detailed ORCID info: {str(e)}")
         return f"https://orcid.org/{orcid_id}", None, None
+
+def get_orcid_detailed_info_cached(orcid_id, state):
+    """Кэшированное получение детальной информации из профиля ORCID"""
+    if not orcid_id:
+        return None, None, None
+    
+    cache_key = f"orcid_detailed_{orcid_id}"
+    
+    # Проверяем кэш
+    if cache_key in state.author_id_cache:
+        return state.author_id_cache[cache_key]
+    
+    try:
+        # Получаем детальную информацию
+        orcid_url, scopus_id, wos_id = get_detailed_orcid_info(orcid_id)
+        
+        result = (orcid_url, scopus_id, wos_id)
+        state.author_id_cache[cache_key] = result
+        return result
+        
+    except Exception as e:
+        print(f"⚠️ Error getting detailed ORCID info for {orcid_id}: {e}")
+        result = (f"https://orcid.org/{orcid_id}", None, None)
+        state.author_id_cache[cache_key] = result
+        return result
+
+def extract_additional_ids_from_orcid(orcid_id, state):
+    """Альтернативные способы получения Scopus/WoS ID для ORCID"""
+    scopus_id = None
+    wos_id = None
+    
+    if not orcid_id:
+        return scopus_id, wos_id
+    
+    try:
+        # Способ 1: Проверка через OpenAlex API
+        openalex_url = f"https://api.openalex.org/authors/orcid:{orcid_id}"
+        response = requests.get(openalex_url, timeout=10)
+        
+        if response.status_code == 200:
+            author_data = response.json()
+            
+            # Ищем внешние идентификаторы в OpenAlex
+            ids = author_data.get('ids', {})
+            
+            # Scopus ID из OpenAlex
+            if 'scopus' in ids:
+                scopus_value = ids['scopus']
+                if isinstance(scopus_value, str) and scopus_value.startswith('https://www.scopus.com'):
+                    scopus_id = scopus_value
+                else:
+                    scopus_id = f"https://www.scopus.com/authid/detail.uri?authorId={scopus_value}"
+            
+            # ResearcherID/WoS из OpenAlex  
+            if 'mag' in ids:  # Microsoft Academic Graph иногда содержит WoS ID
+                mag_id = ids['mag']
+                # Можно попробовать преобразовать, но это ненадежно
+            
+            # Проверяем связи (works) автора на наличие идентификаторов
+            works_url = f"https://api.openalex.org/works?filter=author.id:{author_data.get('id')}"
+            works_response = requests.get(works_url, timeout=10)
+            
+            if works_response.status_code == 200:
+                works_data = works_response.json()
+                for work in works_data.get('results', [])[:5]:  # Проверяем первые 5 работ
+                    # Ищем DOI с префиксами Scopus/WoS
+                    doi = work.get('doi', '')
+                    if doi:
+                        if '10.1016' in doi:  # Elsevier (часто Scopus)
+                            # Можем попробовать найти автора в Scopus по DOI
+                            pass
+        
+        # Способ 2: Проверка через Crossref API
+        crossref_url = f"https://api.crossref.org/works?filter=orcid:{orcid_id}&rows=1"
+        crossref_response = requests.get(crossref_url, timeout=10)
+        
+        if crossref_response.status_code == 200:
+            crossref_data = crossref_response.json()
+            # Crossref может содержать информацию об авторе
+            
+    except Exception as e:
+        print(f"⚠️ Alternative ID extraction failed for ORCID {orcid_id}: {e}")
+    
+    return scopus_id, wos_id
 
 def search_orcid_author_cached(surname, given_name, affiliation, cache_dict):
     """Кэшированная версия поиска автора в ORCID - ИСПРАВЛЕННАЯ"""
@@ -4948,10 +5034,9 @@ def process_author_id_data_parallel(author_list, state):
 
 def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_metadata, state):
     """Оптимизированное извлечение уникальных авторов с ORCID из метаданных"""
-    author_records = {}  # ключ: ORCID ID или полное имя, значение: данные автора
+    author_records = {}
     
     def process_batch(metadata_batch, source_type, batch_name=""):
-        """Обрабатывает батч метаданных"""
         print(f"🔍 Processing {batch_name}: {len(metadata_batch)} articles")
         
         for i, meta in enumerate(metadata_batch):
@@ -5000,12 +5085,30 @@ def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_met
                 
                 record['dois'].add(doi)
                 
+                # ОБНОВЛЕННЫЙ КОД: Если у нас есть данные Scopus/WoS ID, обновляем
+                # ИСПРАВЛЕНО: объединяем данные из разных источников
+                if author_data['scopus_id'] and not record['scopus_id']:
+                    record['scopus_id'] = author_data['scopus_id']
+                if author_data['wos_id'] and not record['wos_id']:
+                    record['wos_id'] = author_data['wos_id']
+                
                 # Если у нас есть ORCID в новых данных, но не было в старых
                 if author_data['orcid_id'] and not record['orcid_id']:
                     record['orcid_id'] = author_data['orcid_id']
                     record['orcid_url'] = author_data['orcid_url']
-                
-                # Аналогично для Scopus и WoS ID
+                    
+                    # ИСПРАВЛЕНО: Если нашли новый ORCID, нужно получить для него Scopus/WoS ID
+                    if not record['scopus_id'] or not record['wos_id']:
+                        # Получаем детальную информацию для этого ORCID
+                        orcid_url, scopus_id, wos_id = get_orcid_detailed_info_cached(
+                            author_data['orcid_id'], 
+                            state
+                        )
+                        
+                        if scopus_id and not record['scopus_id']:
+                            record['scopus_id'] = scopus_id
+                        if wos_id and not record['wos_id']:
+                            record['wos_id'] = wos_id
     
     # Обрабатываем анализируемые статьи
     process_batch(analyzed_metadata, 'analyzed', "analyzed articles")
@@ -5040,8 +5143,15 @@ def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_met
     # Сортируем по количеству DOI (активность)
     author_list.sort(key=lambda x: x['dois_count'], reverse=True)
     
+    # Отладочная информация
+    authors_with_orcid = len([a for a in author_list if a['orcid_id']])
+    authors_with_scopus = len([a for a in author_list if a['scopus_id']])
+    authors_with_wos = len([a for a in author_list if a['wos_id']])
+    
     print(f"📊 Extracted {len(author_list)} unique authors")
-    print(f"   - With ORCID: {len([a for a in author_list if a['orcid_id']])}")
+    print(f"   - With ORCID: {authors_with_orcid}")
+    print(f"   - With Scopus ID: {authors_with_scopus}")
+    print(f"   - With WoS ID: {authors_with_wos}")
     print(f"   - From analyzed articles: {len([a for a in author_list if 'analyzed' in a['sources']])}")
     print(f"   - From citing articles: {len([a for a in author_list if 'citing' in a['sources']])}")
     
@@ -7038,5 +7148,6 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
