@@ -228,9 +228,6 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
         else:
             future_ror = None
         
-        # Author ID data - НОВОЕ: добавляем создание Author ID data если нужно
-        # Но лучше сделать это отдельно в основной функции, так как это может занять много времени
-        
         # Collect results - ИСПРАВЛЕНО: гарантируем получение всех результатов
         try:
             keywords_result = future_keywords.result()
@@ -279,9 +276,6 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
             except Exception as e:
                 print(f"Warning: ROR data processing failed: {e}")
                 results['ror_data'] = {}
-        
-        # Author ID data будет добавлен позже в основной функции если включено
-        # Не добавляем здесь чтобы не замедлять другие анализы
         
         return results
 
@@ -4536,502 +4530,408 @@ def format_author_name_from_raw(raw_name):
     
     return f"{family} {given_names}"
 
-def extract_author_data_from_work(work_data, metadata, doi, state):
-    """Извлекает данные автора из работы и метаданных (только ORCID из доступных данных)"""
-    authors_data = []
-    
-    if not work_data:
-        return authors_data
-    
-    # Получаем ORCID из метаданных
-    orcid_mapping = extract_orcid_from_metadata(metadata)
-    
-    # Обрабатываем авторов из OpenAlex
-    for auth in work_data.get('authorships', []):
+def extract_clean_authors_from_work(data):
+    """Извлекает авторов из данных OpenAlex в формате Фамилия Имя с аффилиацией"""
+    authors = []
+    for auth in data.get('authorships', []):
         raw_name = auth.get('raw_author_name')
         if not raw_name:
             continue
             
-        # Форматируем имя
         name = format_author_name_from_raw(raw_name)
+        
+        # Аффилиация — только название учреждения, без страны
+        aff = "No affiliation"
+        for inst in auth.get('institutions', []):
+            if inst and inst.get('display_name'):
+                aff = inst['display_name']
+                break  # берём только первую
+        
+        # Разделяем имя на фамилию и имя для поиска
         name_parts = name.split()
         surname = name_parts[0] if name_parts else ""
         given_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ""
         
-        # Аффилиация
-        affiliation = "No affiliation"
-        for inst in auth.get('institutions', []):
-            if inst and inst.get('display_name'):
-                affiliation = inst['display_name']
-                break
-        
-        # Ищем ORCID в маппинге
-        orcid_id = None
-        for mapped_name, mapped_orcid in orcid_mapping.items():
-            if mapped_name.lower() == name.lower():
-                orcid_id = mapped_orcid
-                break
-        
-        # НЕ ищем Scopus и WoS ID (для скорости)
-        scopus_id = None
-        wos_id = None
-        
-        authors_data.append({
-            'full_name': name,
+        authors.append({
+            'name': name,
             'surname': surname,
             'given_name': given_name,
-            'affiliation': affiliation,
-            'orcid_id': orcid_id,
-            'orcid_url': f"https://orcid.org/{orcid_id}" if orcid_id else None,
-            'scopus_id': scopus_id,
-            'wos_id': wos_id,
-            'source_doi': doi
+            'affiliation': aff
         })
     
-    return authors_data
+    return authors
 
-def extract_orcid_from_metadata(metadata):
-    """Извлекает ORCID ID для авторов из метаданных Crossref и OpenAlex"""
-    orcid_mapping = {}  # словарь: имя автора -> ORCID ID
-    
-    if not metadata:
-        return orcid_mapping
-    
-    # 1. Проверяем Crossref данные
-    cr_data = metadata.get('crossref')
-    if cr_data:
-        authors = cr_data.get('author', [])
-        for author in authors:
-            if not author:
-                continue
-                
-            # Формируем имя автора
-            family = author.get('family', '').strip()
-            given = author.get('given', '').strip()
-            if not family and not given:
-                continue
-                
-            author_name = f"{given} {family}".strip()
-            
-            # Ищем ORCID в Crossref
-            orcid = None
-            if 'ORCID' in author:
-                orcid = author.get('ORCID')
-            elif 'orcid' in author:
-                orcid = author.get('orcid')
-            
-            if orcid:
-                # Нормализуем ORCID (убираем https://orcid.org/)
-                orcid_clean = str(orcid).strip().lower()
-                if orcid_clean.startswith('https://orcid.org/'):
-                    orcid_clean = orcid_clean[18:]  # Убираем префикс
-                elif orcid_clean.startswith('http://orcid.org/'):
-                    orcid_clean = orcid_clean[17:]
-                
-                # Убедимся, что это валидный ORCID ID (должен содержать 16 символов с дефисами)
-                orcid_clean = orcid_clean.replace('https://', '').replace('http://', '').replace('orcid.org/', '')
-                orcid_clean = orcid_clean.strip()
-                
-                # Проверяем формат ORCID: xxxx-xxxx-xxxx-xxxx
-                if len(orcid_clean) >= 16:
-                    orcid_mapping[author_name] = orcid_clean
-    
-    # 2. Проверяем OpenAlex данные
-    oa_data = metadata.get('openalex')
-    if oa_data:
-        authorships = oa_data.get('authorships', [])
-        for authorship in authorships:
-            if not authorship:
-                continue
-                
-            author_info = authorship.get('author', {})
-            if not author_info:
-                continue
-            
-            # Имя автора из OpenAlex
-            author_name = author_info.get('display_name', '').strip()
-            if not author_name:
-                continue
-            
-            # ORCID из OpenAlex
-            orcid_url = author_info.get('orcid')
-            if orcid_url:
-                # Извлекаем ORCID ID из URL
-                orcid_clean = str(orcid_url).strip().lower()
-                if orcid_clean.startswith('https://orcid.org/'):
-                    orcid_clean = orcid_clean[18:]
-                elif orcid_clean.startswith('http://orcid.org/'):
-                    orcid_clean = orcid_clean[17:]
-                
-                # Убедимся, что это валидный ORCID ID
-                orcid_clean = orcid_clean.replace('https://', '').replace('http://', '').replace('orcid.org/', '')
-                orcid_clean = orcid_clean.strip()
-                
-                if len(orcid_clean) >= 16:
-                    orcid_mapping[author_name] = orcid_clean
-    
-    return orcid_mapping
-    
-def get_work_data_by_doi(doi, state):
-    """Получает данные работы по DOI с кэшированием (без запросов к Scopus/WoS)"""
-    if not doi:
+def get_work_by_doi(doi):
+    """Получает данные работы по DOI из OpenAlex"""
+    doi = doi.strip()
+    url = f"https://api.openalex.org/works/https://doi.org/{doi}"
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except:
         return None
-    
-    # Ключ кэша
-    cache_key = f"work_data_{doi}"
-    
-    # Проверяем кэш
-    if cache_key in state.author_id_cache:
-        return state.author_id_cache[cache_key]
-    
-    # Получаем метаданные
-    metadata = state.unified_cache.get(doi)
-    if not metadata:
-        # Если нет в кэше, получаем данные
-        metadata = {
-            'crossref': get_crossref_metadata(doi, state),
-            'openalex': get_openalex_metadata(doi, state)
-        }
-    
-    if not metadata.get('openalex'):
-        # Получаем OpenAlex данные если нет
-        work_data = get_openalex_metadata(doi, state)
-    else:
-        work_data = metadata['openalex']
-    
-    if not work_data:
-        state.author_id_cache[cache_key] = None
-        return None
-    
-    # Извлекаем данные авторов (без запросов к внешним API)
-    author_data = extract_author_data_from_work(work_data, metadata, doi, state)
-    
-    # Сохраняем в кэш
-    result = {
-        'work_data': work_data,
-        'metadata': metadata,
-        'author_data': author_data
-    }
-    
-    state.author_id_cache[cache_key] = result
-    return result
 
-def search_orcid_fast(surname, given_name, affiliation=None):
-    """Быстрый поиск ORCID по фамилии, имени и аффилиации - упрощенная версия"""
+def search_orcid_author(surname, given_name, affiliation):
+    """Поиск автора в ORCID API по фамилии, имени и аффилиации - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     try:
         if not surname or not surname.strip():
-            return None
+            return None, None, None
             
-        print(f"🔍 ORCID Search: {surname} {given_name}")
+        print(f"🔍 ORCID Search: {surname} {given_name}, Affiliation: {affiliation}")
         
-        # Формируем простой поисковый запрос
-        query = f"family-name:{surname.strip()}"
+        # Формируем поисковый запрос
+        query_parts = [f"family-name:{surname.strip()}"]
         
         if given_name and given_name.strip():
-            # Берем только первую букву имени для ускорения
-            if len(given_name.strip()) > 0:
-                query += f" AND given-names:{given_name.strip()[0]}"
+            # Используем полное имя вместо инициала
+            clean_given_name = given_name.strip()
+            query_parts.append(f"given-names:{clean_given_name}")
         
-        url = f"https://pub.orcid.org/v3.0/search/?q={quote(query)}&rows=5"
+        if affiliation and affiliation.strip():
+            # Используем более широкий поиск по аффилиации
+            query_parts.append(f'affiliation-org-name:"{affiliation.strip()}"')
+        
+        query = " AND ".join(query_parts)
+        url = f"https://pub.orcid.org/v3.0/search/?q={quote(query)}"
         
         headers = {
             'Accept': 'application/json',
             'User-Agent': 'JournalAnalysisTool/1.0'
         }
         
-        response = requests.get(url, headers=headers, timeout=10)
+        print(f"📡 ORCID API Request: {url}")
+        
+        response = requests.get(url, headers=headers, timeout=15)
         
         if response.status_code == 200:
             data = response.json()
             num_results = data.get('num-found', 0)
+            print(f"✅ ORCID API Response: {num_results} results found")
             
             if num_results > 0:
-                # Берем первый результат
+                # Берем первый (наиболее релевантный) результат
                 result = data['result'][0]
                 orcid_id = result.get('orcid-identifier', {}).get('path')
                 
                 if orcid_id:
-                    print(f"✅ Found ORCID: {orcid_id}")
-                    return orcid_id
+                    print(f"🎯 Found ORCID: {orcid_id}")
+                    
+                    # Получаем подробную информацию для Scopus и WoS ID
+                    orcid_url, scopus_id, wos_id = get_detailed_orcid_info(orcid_id)
+                    return orcid_url, scopus_id, wos_id
+            else:
+                print("❌ No results found in ORCID")
+        else:
+            print(f"❌ ORCID API Error: {response.status_code} - {response.text}")
             
-        return None
+        return None, None, None
         
     except Exception as e:
-        print(f"⚠️ Error searching ORCID for {surname}: {str(e)}")
-        return None
+        print(f"🚨 Error searching ORCID for {surname} {given_name}: {str(e)}")
+        return None, None, None
 
-def search_orcid_batch_parallel(authors_without_orcid, state):
-    """Параллельный поиск ORCID для списка авторов без ORCID"""
-    if not authors_without_orcid:
-        return {}
+def get_detailed_orcid_info(orcid_id):
+    """Получает подробную информацию из профиля ORCID включая Scopus и WoS ID"""
+    try:
+        orcid_url = f"https://orcid.org/{orcid_id}"
+        scopus_id = None
+        wos_id = None
+        
+        # Получаем person данные
+        person_url = f"https://pub.orcid.org/v3.0/{orcid_id}/person"
+        headers = {'Accept': 'application/json', 'User-Agent': 'JournalAnalysisTool/1.0'}
+        
+        response = requests.get(person_url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            person_data = response.json()
+            
+            # Ищем внешние идентификаторы
+            external_ids = person_data.get('external-identifiers', {}).get('external-identifier', [])
+            
+            for ext_id in external_ids:
+                ext_id_type = ext_id.get('external-id-type', '')
+                ext_id_value = ext_id.get('external-id-value', '')
+                
+                if not ext_id_value:
+                    continue
+                    
+                if ext_id_type.upper() in ['SCOPUS', 'SCOPUS AUTHOR ID']:
+                    scopus_id = f"https://www.scopus.com/authid/detail.uri?authorId={ext_id_value}"
+                    print(f"🔍 Found Scopus ID: {scopus_id}")
+                    
+                elif ext_id_type.upper() in ['RESEARCHERID', 'WOS']:
+                    wos_id = f"https://www.webofscience.com/wos/author/record/{ext_id_value}"
+                    print(f"🔍 Found WoS ID: {wos_id}")
+            
+            # Дополнительная проверка для Researcher URLs
+            researcher_urls = person_data.get('researcher-urls', {}).get('researcher-url', [])
+            for url_data in researcher_urls:
+                url_value = url_data.get('url', {}).get('value', '')
+                if 'scopus' in url_value.lower() and 'authorId' in url_value:
+                    scopus_id = url_value
+                elif 'researcherid' in url_value.lower() or 'webofscience' in url_value.lower():
+                    wos_id = url_value
+        
+        print(f"✅ Detailed info - ORCID: {orcid_url}, Scopus: {scopus_id}, WoS: {wos_id}")
+        return orcid_url, scopus_id, wos_id
+        
+    except Exception as e:
+        print(f"🚨 Error getting detailed ORCID info: {str(e)}")
+        return f"https://orcid.org/{orcid_id}", None, None
+
+def search_orcid_author_cached(surname, given_name, affiliation, cache_dict):
+    """Кэшированная версия поиска автора в ORCID - ИСПРАВЛЕННАЯ"""
+    if not surname or not surname.strip():
+        return None, None, None
+        
+    cache_key = f"{surname}_{given_name}_{affiliation}".lower().strip()
     
-    print(f"🔍 Starting parallel ORCID search for {len(authors_without_orcid)} authors")
+    if cache_key in cache_dict:
+        print(f"📦 Using cached result for {cache_key}")
+        return cache_dict[cache_key]
+    
+    # Выполняем поиск
+    orcid_id, scopus_id, wos_id = search_orcid_author(surname, given_name, affiliation)
+    
+    # Кэшируем результат (даже если None)
+    cache_dict[cache_key] = (orcid_id, scopus_id, wos_id)
+    
+    return orcid_id, scopus_id, wos_id
+
+def process_author_id_data_parallel(author_list, state):
+    """Обработка данных авторов в параллельном режиме - УЛУЧШЕННАЯ ВЕРСИЯ"""
+    if not state.include_author_id_data:
+        return []
+    
+    if not author_list:
+        print("❌ No authors to process")
+        return []
+    
+    print(f"🔍 Starting parallel Author ID processing for {len(author_list)} authors")
     
     # Прогресс-бар
-    orcid_progress = st.progress(0)
-    orcid_status = st.empty()
+    author_progress = st.progress(0)
+    author_status = st.empty()
     
-    results = {}
+    results = []
+    processed_count = 0
+    total_authors = len(author_list)
     
-    # Готовим данные для параллельной обработки
-    author_data_list = []
-    for author in authors_without_orcid:
+    # Подготавливаем аргументы для параллельной обработки
+    args_list = []
+    for author in author_list:
         surname = author.get('surname', '').strip()
         given_name = author.get('given_name', '').strip()
+        affiliation = author.get('affiliation', '').strip()
+        
         if surname:  # Только авторы с фамилией
-            author_data_list.append({
-                'full_name': author['full_name'],
-                'surname': surname,
-                'given_name': given_name,
-                'affiliation': author.get('affiliation', '')
-            })
+            args_list.append((surname, given_name, affiliation, state.author_id_cache))
     
-    total_authors = len(author_data_list)
+    if not args_list:
+        print("❌ No valid authors to process")
+        author_progress.empty()
+        author_status.empty()
+        return []
     
-    if total_authors == 0:
-        orcid_progress.empty()
-        orcid_status.empty()
-        return {}
-    
-    # Используем 30 параллельных потоков
-    with ThreadPoolExecutor(max_workers=30) as executor:
+    # Используем меньше рабочих потоков для избежания rate limiting
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {}
         
-        for i, author_data in enumerate(author_data_list):
-            future = executor.submit(
-                search_orcid_fast, 
-                author_data['surname'],
-                author_data['given_name'],
-                author_data['affiliation']
-            )
-            futures[future] = author_data
+        for i, args in enumerate(args_list):
+            future = executor.submit(search_orcid_author_cached, args[0], args[1], args[2], args[3])
+            futures[future] = i
         
-        completed = 0
-        for future in as_completed(futures):
-            author_data = futures[future]
+        for i, future in enumerate(as_completed(futures)):
+            author_index = futures[future]
+            author_data = author_list[author_index]
             
             try:
-                orcid_id = future.result()
-                if orcid_id:
-                    results[author_data['full_name']] = orcid_id
+                orcid_id, scopus_id, wos_id = future.result()
                 
-                completed += 1
+                # Создаем запись с полной информацией об авторе
+                result_entry = {
+                    'Full Name': author_data['full_name'],
+                    'Surname': author_data['surname'],
+                    'Given Name': author_data['given_name'],
+                    'Affiliation': author_data['affiliation'],
+                    '.': '.',  # Точка в пустой колонке
+                    'ORCID ID': orcid_id if orcid_id else '',
+                    'Scopus ID': scopus_id if scopus_id else '',
+                    'WoS ID': wos_id if wos_id else '',
+                    'Sources': ', '.join(author_data['sources']),
+                    'All Affiliations': '; '.join(author_data['all_affiliations']) if author_data['all_affiliations'] else 'No affiliation'
+                }
+                
+                results.append(result_entry)
+                processed_count += 1
                 
                 # Обновляем прогресс
-                progress = completed / total_authors
-                orcid_progress.progress(progress)
-                orcid_status.text(f"🔍 ORCID search: {completed}/{total_authors}")
+                progress = (i + 1) / len(args_list)
+                author_progress.progress(progress)
+                author_status.text(f"🔍 Processing Author ID data: {i + 1}/{len(args_list)}")
+                
+                # Добавляем небольшую задержку для избежания rate limiting
+                time.sleep(0.2)
                 
             except Exception as e:
-                print(f"⚠️ Error processing author {author_data['full_name']}: {e}")
-                completed += 1
+                print(f"⚠️ Error processing author {author_data['surname']} {author_data['given_name']}: {str(e)}")
+                # Добавляем запись с ошибкой (но без ID)
+                results.append({
+                    'Full Name': author_data['full_name'],
+                    'Surname': author_data['surname'],
+                    'Given Name': author_data['given_name'],
+                    'Affiliation': author_data['affiliation'],
+                    '.': '.',
+                    'ORCID ID': '',
+                    'Scopus ID': '',
+                    'WoS ID': '',
+                    'Sources': ', '.join(author_data['sources']),
+                    'All Affiliations': '; '.join(author_data['all_affiliations']) if author_data['all_affiliations'] else 'No affiliation'
+                })
+                processed_count += 1
     
-    orcid_progress.empty()
-    orcid_status.empty()
+    author_progress.empty()
+    author_status.empty()
     
-    print(f"✅ ORCID search completed: found {len(results)} ORCIDs")
+    print(f"✅ Author ID processing completed: {processed_count}/{total_authors} authors processed")
+    
+    # Логируем статистику
+    found_orcid = sum(1 for r in results if r['ORCID ID'] != '')
+    found_scopus = sum(1 for r in results if r['Scopus ID'] != '') 
+    found_wos = sum(1 for r in results if r['WoS ID'] != '')
+    
+    print(f"📊 Results - ORCID: {found_orcid}, Scopus: {found_scopus}, WoS: {found_wos}")
+    
     return results
+
+def extract_unique_authors_from_metadata(analyzed_metadata, citing_metadata, state):
+    """Извлекает уникальных авторов из метаданных анализируемых и цитирующих статей с объединением аффилиаций"""
+    author_records = {}  # ключ: "Фамилия Имя", значение: список аффилиаций
     
-def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_metadata, state):
-    """Оптимизированное извлечение уникальных авторов с ORCID из метаданных"""
-    author_records = {}
-    
-    def process_batch(metadata_batch, source_type, batch_name=""):
-        print(f"🔍 Processing {batch_name}: {len(metadata_batch)} articles")
-        
-        for i, meta in enumerate(metadata_batch):
-            if not meta:
+    def process_metadata(metadata_list, source_type):
+        """Обрабатывает метаданные и добавляет авторов в общую коллекцию"""
+        for meta in metadata_list:
+            if not meta or not meta.get('openalex'):
                 continue
                 
             doi = meta.get('doi')
             if not doi:
                 continue
-            
-            # Получаем данные работы с кэшированием
-            work_info = get_work_data_by_doi(doi, state)
-            if not work_info:
+                
+            # Получаем данные работы
+            work_data = get_work_by_doi(doi)
+            if not work_data:
                 continue
                 
-            author_data_list = work_info['author_data']
-            
-            for author_data in author_data_list:
-                # Используем полное имя как ключ (для ускорения)
-                key = author_data['full_name']
+            # Извлекаем авторов
+            authors = extract_clean_authors_from_work(work_data)
+            for author in authors:
+                author_name = author['name']
+                affiliation = author['affiliation']
                 
-                if key not in author_records:
-                    author_records[key] = {
-                        'full_name': author_data['full_name'],
-                        'surname': author_data['surname'],
-                        'given_name': author_data['given_name'],
-                        'affiliation': author_data['affiliation'],
-                        'orcid_id': author_data['orcid_id'],
-                        'orcid_url': author_data['orcid_url'],
-                        'scopus_id': author_data['scopus_id'],
-                        'wos_id': author_data['wos_id'],
-                        'sources': set(),
-                        'all_affiliations': set(),
-                        'dois': set()
+                if author_name not in author_records:
+                    author_records[author_name] = {
+                        'surname': author['surname'],
+                        'given_name': author['given_name'],
+                        'affiliations': set(),
+                        'sources': set()
                     }
                 
-                # Добавляем информацию
-                record = author_records[key]
-                record['sources'].add(source_type)
+                # Добавляем аффилиацию (если есть)
+                if affiliation and affiliation != "No affiliation":
+                    author_records[author_name]['affiliations'].add(affiliation)
                 
-                if author_data['affiliation'] and author_data['affiliation'] != "No affiliation":
-                    record['all_affiliations'].add(author_data['affiliation'])
-                
-                record['dois'].add(doi)
+                # Отмечаем источник
+                author_records[author_name]['sources'].add(source_type)
     
     # Обрабатываем анализируемые статьи
-    process_batch(analyzed_metadata, 'analyzed', "analyzed articles")
+    print("🔍 Processing analyzed articles for authors...")
+    process_metadata(analyzed_metadata, 'analyzed')
     
     # Обрабатываем цитирующие статьи
-    process_batch(citing_metadata, 'citing', "citing articles")
+    print("🔍 Processing citing articles for authors...")
+    process_metadata(citing_metadata, 'citing')
     
-    # Преобразуем в список
+    # Преобразуем в список с выбором лучшей аффилиации
     author_list = []
     
-    for key, data in author_records.items():
-        # Выбираем лучшую аффилиацию
-        affiliations_list = list(data['all_affiliations'])
-        best_affiliation = data['affiliation']
-        if not best_affiliation or best_affiliation == "No affiliation":
-            best_affiliation = affiliations_list[0] if affiliations_list else "No affiliation"
+    for author_name, data in author_records.items():
+        affiliations_list = list(data['affiliations'])
+        
+        # Выбираем лучшую аффилиацию по приоритету:
+        # 1. Аффилиация из анализируемых статей
+        # 2. Первая аффилиация из цитирующих статей  
+        # 3. "No affiliation" если ничего нет
+        
+        best_affiliation = "No affiliation"
+        if affiliations_list:
+            # Если автор есть в анализируемых статьях, предпочитаем его аффилиации
+            if 'analyzed' in data['sources']:
+                # Ищем аффилиации из анализируемых статей
+                analyzed_affiliations = set()
+                # Для этого нужно проверить исходные данные, но в упрощенной версии берем первую
+                best_affiliation = affiliations_list[0]
+            else:
+                # Только цитирующие статьи - берем первую аффилиацию
+                best_affiliation = affiliations_list[0]
         
         author_list.append({
             'surname': data['surname'],
             'given_name': data['given_name'],
-            'full_name': data['full_name'],
+            'full_name': author_name,
             'affiliation': best_affiliation,
-            'orcid_id': data['orcid_id'],
-            'orcid_url': data['orcid_url'],
-            'scopus_id': data['scopus_id'],
-            'wos_id': data['wos_id'],
-            'all_affiliations': list(data['all_affiliations']),
-            'sources': list(data['sources']),
-            'dois_count': len(data['dois'])
+            'all_affiliations': affiliations_list,  # сохраняем все аффилиации для отладки
+            'sources': list(data['sources'])
         })
     
-    # Сортируем по количеству DOI (активность)
-    author_list.sort(key=lambda x: x['dois_count'], reverse=True)
+    # Сортируем по фамилии для удобства
+    author_list.sort(key=lambda x: x['surname'])
+    
+    print(f"📊 Extracted {len(author_list)} unique authors from metadata")
+    print(f"   - With affiliations: {len([a for a in author_list if a['affiliation'] != 'No affiliation'])}")
+    print(f"   - From analyzed articles: {len([a for a in author_list if 'analyzed' in a['sources']])}")
+    print(f"   - From citing articles: {len([a for a in author_list if 'citing' in a['sources']])}")
+    print(f"   - From both sources: {len([a for a in author_list if len(a['sources']) > 1])}")
     
     return author_list
 
-def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
-    """Оптимизированное создание листа Author_ID_data с быстрым поиском ORCID"""
+def create_author_id_sheet(analyzed_metadata, citing_metadata, state):
+    """Создает лист Author_ID_data с данными об идентификаторах авторов"""
     if not state.include_author_id_data:
         return []
     
-    # Показываем статус
-    st.info("🔍 Extracting author information from metadata...")
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # Шаг 1: Извлекаем уникальных авторов из метаданных (быстро)
-    status_text.text("Step 1/3: Extracting authors from metadata...")
-    unique_authors = extract_unique_authors_from_metadata_optimized(
-        analyzed_metadata, citing_metadata, state
-    )
-    
-    progress_bar.progress(0.3)
+    # Извлекаем уникальных авторов с объединением данных
+    unique_authors = extract_unique_authors_from_metadata(analyzed_metadata, citing_metadata, state)
     
     if not unique_authors:
-        progress_bar.empty()
-        status_text.empty()
         st.info("No authors found for Author ID data processing.")
         return []
     
     # Показываем статистику
-    authors_with_orcid = len([a for a in unique_authors if a['orcid_id']])
-    st.success(f"✅ Step 1 complete: Extracted {len(unique_authors)} unique authors")
-    st.info(f"   - Already have ORCID: {authors_with_orcid}")
-    st.info(f"   - Need ORCID search: {len(unique_authors) - authors_with_orcid}")
+    st.info(f"📊 Found {len(unique_authors)} unique authors for ID processing")
     
-    # Шаг 2: Ищем ORCID для авторов без ORCID
-    if authors_with_orcid < len(unique_authors):
-        status_text.text("Step 2/3: Searching for missing ORCIDs...")
-        
-        # Собираем авторов без ORCID
-        authors_without_orcid = [a for a in unique_authors if not a['orcid_id']]
-        
-        if authors_without_orcid:
-            # Параллельный поиск ORCID
-            found_orcids = search_orcid_batch_parallel(authors_without_orcid, state)
-            
-            # Обновляем авторов с найденными ORCID
-            if found_orcids:
-                for author in unique_authors:
-                    if not author['orcid_id'] and author['full_name'] in found_orcids:
-                        author['orcid_id'] = found_orcids[author['full_name']]
-                        author['orcid_url'] = f"https://orcid.org/{author['orcid_id']}"
-                
-                new_orcids = len(found_orcids)
-                st.success(f"✅ Found ORCID for {new_orcids} additional authors")
+    # Обрабатываем данные авторов
+    author_id_data = process_author_id_data_parallel(unique_authors, state)
     
-    progress_bar.progress(0.7)
-    status_text.text("Step 3/3: Preparing data for Excel...")
+    # Создаем финальный DataFrame с нужными колонками
+    final_columns = [
+        'Full Name', 
+        'Surname', 
+        'Given Name', 
+        'Affiliation', 
+        '.', 
+        'ORCID ID', 
+        'Scopus ID', 
+        'WoS ID'
+    ]
     
-    # Шаг 3: Создаем финальные данные для Excel
+    # Фильтруем только нужные колонки для итогового листа
     final_data = []
-    for author in unique_authors:
-        # Определяем Sources
-        sources = author['sources']
-        if 'analyzed' in sources and 'citing' in sources:
-            sources_str = "Both"
-        elif 'analyzed' in sources:
-            sources_str = "Analyzed"
-        else:
-            sources_str = "Citing"
-        
-        # Собираем все аффилиации
-        all_affiliations = author.get('all_affiliations', [])
-        if author['affiliation'] and author['affiliation'] != "No affiliation":
-            if author['affiliation'] not in all_affiliations:
-                all_affiliations = [author['affiliation']] + all_affiliations
-        
-        # Формируем ORCID URL если есть
-        orcid_url = ""
-        if author['orcid_id']:
-            orcid_url = f"https://orcid.org/{author['orcid_id']}"
-        
-        final_data.append({
-            'Full Name': author['full_name'],
-            'Surname': author['surname'],
-            'Given Name': author['given_name'],
-            'Affiliation': author['affiliation'],
-            '.': '.',  # Разделитель
-            'ORCID ID': orcid_url,
-            'Scopus ID': author['scopus_id'] if author.get('scopus_id') else '',
-            'WoS ID': author['wos_id'] if author.get('wos_id') else '',
-            'Sources': sources_str,
-            'All Affiliations': '; '.join(all_affiliations) if all_affiliations else 'No affiliation',
-            'DOIs Count': author['dois_count']
-        })
-    
-    # Сортируем по наличию ORCID и активности
-    final_data.sort(key=lambda x: (
-        0 if x['ORCID ID'] else 1,  # Сначала с ORCID
-        -x['DOIs Count']            # Затем по активности
-    ))
-    
-    # Обновляем финальную статистику
-    final_with_orcid = len([a for a in final_data if a['ORCID ID']])
-    
-    progress_bar.progress(1.0)
-    status_text.text(f"✅ Prepared {len(final_data)} authors for Excel sheet")
-    
-    # Показываем финальную статистику
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Authors", len(final_data))
-    with col2:
-        st.metric("With ORCID", final_with_orcid)
-    with col3:
-        st.metric("ORCID Coverage", f"{(final_with_orcid/len(final_data)*100):.1f}%")
-    
-    time.sleep(1)
-    progress_bar.empty()
-    status_text.empty()
+    for record in author_id_data:
+        final_record = {col: record[col] for col in final_columns}
+        final_data.append(final_record)
     
     return final_data
 
@@ -5308,7 +5208,7 @@ def collect_terms_topics_statistics(analyzed_metadata, citing_metadata):
 def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
     """Create enhanced Excel report with error handling for large data"""
     
-    # ДОБАВИТЬ В НАЧАЛЕ ФУНКЦИИ:
+    # ДОБАВИТЬ В НАЧАЛО ФУНКЦИИ:
     state = get_analysis_state()
     precomputed_data = precompute_excel_data(
         analyzed_data, citing_data, analyzed_stats, citing_stats, 
@@ -5932,46 +5832,14 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 special_metrics_df = pd.DataFrame(special_metrics_data)
                 special_metrics_df.to_excel(writer, sheet_name='Special_Analysis_Metrics', index=False)
 
+            # === NEW SHEET: Author ID Data ===
             # Sheet 20: Author_ID_data (NEW)
             if state.include_author_id_data:
-                # Получаем данные из additional_data
-                author_id_info = additional_data.get('author_id_info', {})
-                author_id_data = author_id_info.get('author_id_data', [])
-                
+                author_id_data = create_author_id_sheet(analyzed_data, citing_data, state)
                 if author_id_data:
-                    # Преобразуем данные в DataFrame
                     author_id_df = pd.DataFrame(author_id_data)
-                    
-                    # Удаляем временную колонку DOIs Count если есть
-                    if 'DOIs Count' in author_id_df.columns:
-                        author_id_df = author_id_df.drop(columns=['DOIs Count'])
-                    
-                    # Убедимся, что все нужные колонки есть
-                    expected_columns = [
-                        'Full Name', 'Surname', 'Given Name', 'Affiliation', '.',
-                        'ORCID ID', 'Scopus ID', 'WoS ID', 'Sources', 'All Affiliations'
-                    ]
-                    
-                    for col in expected_columns:
-                        if col not in author_id_df.columns:
-                            author_id_df[col] = ''
-                    
-                    # Записываем в Excel
-                    author_id_df = author_id_df[expected_columns]  # Упорядочиваем колонки
                     author_id_df.to_excel(writer, sheet_name='Author_ID_data', index=False)
-                    
-                    st.success(f"✅ Author ID data saved: {len(author_id_df)} authors")
-                else:
-                    # Если данных нет, создаем лист с информацией
-                    empty_df = pd.DataFrame({
-                        'Status': ['Author ID data processing'],
-                        'Message': [f'Author ID data was requested but no data was collected. This might be because:'],
-                        'Possible Reasons': ['1. No authors found in the metadata'],
-                        '': ['2. ORCID extraction failed'],
-                        'Check': ['3. Check the console logs for details']
-                    })
-                    empty_df.to_excel(writer, sheet_name='Author_ID_data', index=False)
-            
+
             # Ensure at least one sheet exists
             if len(writer.sheets) == 0:
                 summary_df = pd.DataFrame({
@@ -6587,323 +6455,6 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
         citing_stats     # передаем статистику
     )
     
-    # Добавляем Author ID data если включено
-    if state.include_author_id_data:
-        overall_status.text("Collecting Author ID data...")
-        
-        # Создаем Author ID data
-        author_id_data = create_author_id_sheet_optimized(analyzed_metadata, all_citing_metadata, state)
-        
-        # Добавляем в additional_data
-        additional_data['author_id_info'] = {
-            'author_id_data': author_id_data,
-            'total_authors': len(author_id_data),
-            'authors_with_orcid': len([a for a in author_id_data if a.get('ORCID ID')])
-        }
-    
-    # Add special analysis metrics if available
-    if state.is_special_analysis and 'special_analysis' in additional_data:
-        additional_data['special_analysis_metrics'] = additional_data['special_analysis']
-    
-    overall_progress.progress(0.9)
-    
-    # Report creation
-    overall_status.text(translation_manager.get_text('creating_report'))
-
-    analysis_end_time = time.time()
-    analysis_duration = analysis_end_time - analysis_start_time
-    minutes = int(analysis_duration // 60)
-    seconds = int(analysis_duration % 60)
-    
-    st.success(f"✅ Data analysis completed in {minutes}m {seconds}s")
-    st.info("📊 Now generating Excel report...")
-    
-    excel_start_time = time.time()  # Таймер для генерации Excel
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f'journal_analysis_{issn}_{timestamp}.xlsx'
-    
-    # Create Excel file in memory
-    excel_buffer = io.BytesIO()
-    
-    # Prepare data for Excel
-    excel_data = {
-        'analyzed': analyzed_metadata,
-        'citing': all_citing_metadata,
-        'stats': {
-            'analyzed': analyzed_stats,
-            'citing': citing_stats,
-            'enhanced': enhanced_stats,
-            'timing': citation_timing
-        },
-        'metrics': {
-            'fast': fast_metrics,
-            'overlap': overlap_details
-        },
-        'additional': additional_data
-    }
-    
-    create_enhanced_excel_report(
-        analyzed_metadata, 
-        all_citing_metadata, 
-        analyzed_stats, 
-        citing_stats, 
-        enhanced_stats, 
-        citation_timing, 
-        overlap_details, 
-        fast_metrics, 
-        excel_buffer,
-        additional_data
-    )
-    
-    excel_buffer.seek(0)
-    state.excel_buffer = excel_buffer
-
-    excel_end_time = time.time()
-    excel_duration = excel_end_time - excel_start_time
-    total_duration = excel_end_time - analysis_start_time
-    
-    total_minutes = int(total_duration // 60)
-    total_seconds = int(total_duration % 60)
-    excel_minutes = int(excel_duration // 60)
-    excel_seconds = int(excel_duration % 60)
-    
-    overall_progress.progress(1.0)
-    overall_status.text(translation_manager.get_text('analysis_complete'))
-
-    st.success(f"🎉 Complete analysis finished in {total_minutes}m {total_seconds}s")
-    st.info(f"⏱️ Breakdown: Data analysis - {minutes}m {seconds}s, Excel generation - {excel_minutes}m {excel_seconds}s")
-    
-    # Save results
-    state.analysis_results = {
-        'analysis_duration': total_duration,
-        'data_analysis_time': analysis_duration,
-        'excel_generation_time': excel_duration,
-        'analyzed_stats': analyzed_stats,
-        'citing_stats': citing_stats,
-        'enhanced_stats': enhanced_stats,
-        'citation_timing': citation_timing,
-        'overlap_details': overlap_details,
-        'fast_metrics': fast_metrics,
-        'additional_data': additional_data,
-        'journal_name': journal_name,
-        'issn': issn,
-        'period': period_str,
-        'n_analyzed': n_analyzed,
-        'n_citing': n_citing
-    }
-    
-    # Add special analysis metrics to results if available
-    if state.is_special_analysis:
-        state.analysis_results['special_analysis_metrics'] = additional_data.get('special_analysis_metrics', {})
-    
-    state.analysis_complete = True
-    
-    # Clear old caches to free memory
-    clear_old_cache()
-    
-    time.sleep(1)
-    overall_progress.empty()
-    overall_status.empty()
-
-    # Останавливаем таймер
-    stop_timer = True
-    timer_thread.join(timeout=1)
-    
-    # Финальное отображение времени
-    elapsed_time = time.time() - analysis_start_time
-    minutes = int(elapsed_time // 60)
-    seconds = int(elapsed_time % 60)
-    timer_container.success(f"✅ Total analysis completed in: {minutes:02d}:{seconds:02d}")
-    
-    # Функция для обновления счетчика общего времени
-    def update_timer():
-        elapsed_time = time.time() - analysis_start_time
-        minutes = int(elapsed_time // 60)
-        seconds = int(elapsed_time % 60)
-        timer_container.info(f"⏱️ Total analysis time: {minutes:02d}:{seconds:02d}")
-    
-    # Запускаем обновление таймера в отдельном потоке
-    import threading
-    stop_timer = False
-    
-    def timer_thread():
-        while not stop_timer:
-            update_timer()
-            time.sleep(1)  # Обновляем каждую секунду
-    
-    timer_thread = threading.Thread(target=timer_thread, daemon=True)
-    timer_thread.start()
-    
-    # Set analysis modes
-    state.is_special_analysis = special_analysis
-    state.include_ror_data = include_ror_data
-    state.include_author_id_data = include_author_id_data
-    
-    # Predictive cache warmup
-    predictive_cache_warmup(issn)
-    
-    # Load metrics data in background
-    load_metrics_data()
-    
-    # Overall progress
-    overall_progress = st.progress(0)
-    overall_status = st.empty()
-    
-    # Period parsing
-    overall_status.text(translation_manager.get_text('parsing_period'))
-    
-    if state.is_special_analysis:
-        current_date = datetime.now()
-        from_date = (current_date - timedelta(days=1580)).strftime('%Y-%m-%d')
-        until_date = (current_date - timedelta(days=120)).strftime('%Y-%m-%d')
-        years = [current_date.year - 4, current_date.year - 3, current_date.year - 2, current_date.year - 1]
-        st.info(f"🔬 Special Analysis Mode: Using fixed period {from_date} to {until_date}")
-    else:
-        years = parse_period(period_str)
-        if not years:
-            return
-        from_date = f"{min(years)}-01-01"
-        until_date = f"{max(years)}-12-31"
-    
-    overall_progress.progress(0.1)
-    
-    # Journal name (optimized with caching)
-    overall_status.text(translation_manager.get_text('getting_journal_name'))
-    journal_name = optimized_get_journal_name(issn)
-    st.success(translation_manager.get_text('journal_found').format(journal_name=journal_name, issn=issn))
-    overall_progress.progress(0.2)
-    
-    # Article retrieval
-    overall_status.text(translation_manager.get_text('loading_articles'))
-    items = fetch_articles_by_issn_period(issn, from_date, until_date)
-    if not items:
-        st.error(translation_manager.get_text('no_articles_found'))
-        return
-
-    n_analyzed = len(items)
-    st.success(translation_manager.get_text('articles_found').format(count=n_analyzed))
-    overall_progress.progress(0.3)
-    
-    # Data validation
-    overall_status.text(translation_manager.get_text('validating_data'))
-    validated_items = validate_and_clean_data(items)
-    journal_prefix = get_doi_prefix(validated_items[0].get('DOI', '')) if validated_items else ''
-    overall_progress.progress(0.4)
-    
-    # PARALLEL: Analyzed articles processing
-    overall_status.text(translation_manager.get_text('processing_articles'))
-    
-    analyzed_metadata = []
-    dois = [item.get('DOI') for item in validated_items if item.get('DOI')]
-    
-    # Use parallel metadata loading
-    meta_progress = st.progress(0)
-    meta_status = st.empty()
-    
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(parallel_metadata_loading, doi, state): doi for doi in dois}
-        
-        for i, future in enumerate(as_completed(futures)):
-            doi = futures[future]
-            try:
-                result = future.result()
-                analyzed_metadata.append({
-                    'doi': doi,
-                    'crossref': result['crossref'],
-                    'openalex': result['openalex']
-                })
-            except Exception as e:
-                st.error(f"Error processing DOI {doi}: {e}")
-            
-            progress = (i + 1) / len(dois)
-            meta_progress.progress(progress)
-            meta_status.text(f"{translation_manager.get_text('getting_metadata')}: {i + 1}/{len(dois)}")
-    
-    meta_progress.empty()
-    meta_status.empty()
-    overall_progress.progress(0.6)
-    
-    # PARALLEL: Citing works retrieval and processing
-    overall_status.text(translation_manager.get_text('collecting_citations'))
-    
-    all_citing_metadata = []
-    analyzed_dois = [am['doi'] for am in analyzed_metadata if am.get('doi')]
-    
-    citing_progress = st.progress(0)
-    citing_status = st.empty()
-    
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(get_citing_dois_and_metadata, (doi, state)): doi for doi in analyzed_dois}
-        
-        for i, future in enumerate(as_completed(futures)):
-            doi = futures[future]
-            try:
-                citings = future.result()
-                all_citing_metadata.extend(citings)
-            except Exception as e:
-                st.error(f"Error collecting citations for {doi}: {e}")
-            
-            progress = (i + 1) / len(analyzed_dois)
-            citing_progress.progress(progress)
-            citing_status.text(f"{translation_manager.get_text('collecting_citations_progress')}: {i + 1}/{len(analyzed_dois)}")
-    
-    citing_progress.empty()
-    citing_status.empty()
-    
-    # Unique citing works
-    unique_citing_dois = set(c['doi'] for c in all_citing_metadata if c.get('doi'))
-    n_citing = len(unique_citing_dois)
-    st.success(translation_manager.get_text('unique_citing_works').format(count=n_citing))
-    overall_progress.progress(0.7)
-    
-    # PARALLEL: Statistics and metrics calculation
-    overall_status.text(translation_manager.get_text('calculating_statistics'))
-    
-    # Use parallel metrics calculation
-    stats_progress = st.progress(0)
-    stats_status = st.empty()
-    
-    # Start parallel calculations
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        future_analyzed_stats = executor.submit(extract_stats_from_metadata, analyzed_metadata, journal_prefix=journal_prefix)
-        future_citing_stats = executor.submit(extract_stats_from_metadata, all_citing_metadata, is_analyzed=False)
-        future_parallel_metrics = executor.submit(parallel_metrics_calculation, analyzed_metadata, all_citing_metadata, state, issn)
-        
-        # Wait for completion with progress updates
-        stats_status.text("Calculating analyzed statistics...")
-        analyzed_stats = future_analyzed_stats.result()
-        stats_progress.progress(0.33)
-        
-        stats_status.text("Calculating citing statistics...")
-        citing_stats = future_citing_stats.result()
-        stats_progress.progress(0.66)
-        
-        stats_status.text("Calculating advanced metrics...")
-        parallel_metrics = future_parallel_metrics.result()
-        stats_progress.progress(1.0)
-    
-    stats_progress.empty()
-    stats_status.empty()
-    
-    # Extract results from parallel metrics
-    enhanced_stats = parallel_metrics['basic']
-    fast_metrics = parallel_metrics['fast']
-    citation_timing = parallel_metrics['timing']
-    overlap_details = parallel_metrics['overlap']
-    
-    # PARALLEL: Additional analyses
-    overall_status.text("Calculating additional insights...")
-    
-    additional_data = parallel_analyses(
-        analyzed_metadata, 
-        all_citing_metadata, 
-        state, 
-        citation_timing['days_median'],
-        analyzed_stats,  # передаем статистику
-        citing_stats     # передаем статистику
-    )
-    
     # Add special analysis metrics if available
     if state.is_special_analysis and 'special_analysis' in additional_data:
         additional_data['special_analysis_metrics'] = additional_data['special_analysis']
@@ -7263,10 +6814,3 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
-
-
-
-
-
-
-
