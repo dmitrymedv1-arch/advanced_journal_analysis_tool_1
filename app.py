@@ -228,6 +228,9 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
         else:
             future_ror = None
         
+        # Author ID data - НОВОЕ: добавляем создание Author ID data если нужно
+        # Но лучше сделать это отдельно в основной функции, так как это может занять много времени
+        
         # Collect results - ИСПРАВЛЕНО: гарантируем получение всех результатов
         try:
             keywords_result = future_keywords.result()
@@ -276,6 +279,9 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
             except Exception as e:
                 print(f"Warning: ROR data processing failed: {e}")
                 results['ror_data'] = {}
+        
+        # Author ID data будет добавлен позже в основной функции если включено
+        # Не добавляем здесь чтобы не замедлять другие анализы
         
         return results
 
@@ -4622,7 +4628,13 @@ def extract_orcid_from_metadata(metadata):
                 elif orcid_clean.startswith('http://orcid.org/'):
                     orcid_clean = orcid_clean[17:]
                 
-                orcid_mapping[author_name] = orcid_clean
+                # Убедимся, что это валидный ORCID ID (должен содержать 16 символов с дефисами)
+                orcid_clean = orcid_clean.replace('https://', '').replace('http://', '').replace('orcid.org/', '')
+                orcid_clean = orcid_clean.strip()
+                
+                # Проверяем формат ORCID: xxxx-xxxx-xxxx-xxxx
+                if len(orcid_clean) >= 16:
+                    orcid_mapping[author_name] = orcid_clean
     
     # 2. Проверяем OpenAlex данные
     oa_data = metadata.get('openalex')
@@ -4651,7 +4663,12 @@ def extract_orcid_from_metadata(metadata):
                 elif orcid_clean.startswith('http://orcid.org/'):
                     orcid_clean = orcid_clean[17:]
                 
-                orcid_mapping[author_name] = orcid_clean
+                # Убедимся, что это валидный ORCID ID
+                orcid_clean = orcid_clean.replace('https://', '').replace('http://', '').replace('orcid.org/', '')
+                orcid_clean = orcid_clean.strip()
+                
+                if len(orcid_clean) >= 16:
+                    orcid_mapping[author_name] = orcid_clean
     
     return orcid_mapping
     
@@ -4899,7 +4916,7 @@ def extract_unique_authors_from_metadata_optimized(analyzed_metadata, citing_met
     author_list.sort(key=lambda x: x['dois_count'], reverse=True)
     
     return author_list
-    
+
 def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
     """Оптимизированное создание листа Author_ID_data с быстрым поиском ORCID"""
     if not state.include_author_id_data:
@@ -4982,7 +4999,7 @@ def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
             'Surname': author['surname'],
             'Given Name': author['given_name'],
             'Affiliation': author['affiliation'],
-            '.': '.',
+            '.': '.',  # Разделитель
             'ORCID ID': orcid_url,
             'Scopus ID': author['scopus_id'] if author.get('scopus_id') else '',
             'WoS ID': author['wos_id'] if author.get('wos_id') else '',
@@ -4996,10 +5013,6 @@ def create_author_id_sheet_optimized(analyzed_metadata, citing_metadata, state):
         0 if x['ORCID ID'] else 1,  # Сначала с ORCID
         -x['DOIs Count']            # Затем по активности
     ))
-    
-    # Убираем служебную колонку
-    for item in final_data:
-        item.pop('DOIs Count', None)
     
     # Обновляем финальную статистику
     final_with_orcid = len([a for a in final_data if a['ORCID ID']])
@@ -6551,6 +6564,323 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
         citing_stats     # передаем статистику
     )
     
+    # Добавляем Author ID data если включено
+    if state.include_author_id_data:
+        overall_status.text("Collecting Author ID data...")
+        
+        # Создаем Author ID data
+        author_id_data = create_author_id_sheet_optimized(analyzed_metadata, all_citing_metadata, state)
+        
+        # Добавляем в additional_data
+        additional_data['author_id_info'] = {
+            'author_id_data': author_id_data,
+            'total_authors': len(author_id_data),
+            'authors_with_orcid': len([a for a in author_id_data if a.get('ORCID ID')])
+        }
+    
+    # Add special analysis metrics if available
+    if state.is_special_analysis and 'special_analysis' in additional_data:
+        additional_data['special_analysis_metrics'] = additional_data['special_analysis']
+    
+    overall_progress.progress(0.9)
+    
+    # Report creation
+    overall_status.text(translation_manager.get_text('creating_report'))
+
+    analysis_end_time = time.time()
+    analysis_duration = analysis_end_time - analysis_start_time
+    minutes = int(analysis_duration // 60)
+    seconds = int(analysis_duration % 60)
+    
+    st.success(f"✅ Data analysis completed in {minutes}m {seconds}s")
+    st.info("📊 Now generating Excel report...")
+    
+    excel_start_time = time.time()  # Таймер для генерации Excel
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f'journal_analysis_{issn}_{timestamp}.xlsx'
+    
+    # Create Excel file in memory
+    excel_buffer = io.BytesIO()
+    
+    # Prepare data for Excel
+    excel_data = {
+        'analyzed': analyzed_metadata,
+        'citing': all_citing_metadata,
+        'stats': {
+            'analyzed': analyzed_stats,
+            'citing': citing_stats,
+            'enhanced': enhanced_stats,
+            'timing': citation_timing
+        },
+        'metrics': {
+            'fast': fast_metrics,
+            'overlap': overlap_details
+        },
+        'additional': additional_data
+    }
+    
+    create_enhanced_excel_report(
+        analyzed_metadata, 
+        all_citing_metadata, 
+        analyzed_stats, 
+        citing_stats, 
+        enhanced_stats, 
+        citation_timing, 
+        overlap_details, 
+        fast_metrics, 
+        excel_buffer,
+        additional_data
+    )
+    
+    excel_buffer.seek(0)
+    state.excel_buffer = excel_buffer
+
+    excel_end_time = time.time()
+    excel_duration = excel_end_time - excel_start_time
+    total_duration = excel_end_time - analysis_start_time
+    
+    total_minutes = int(total_duration // 60)
+    total_seconds = int(total_duration % 60)
+    excel_minutes = int(excel_duration // 60)
+    excel_seconds = int(excel_duration % 60)
+    
+    overall_progress.progress(1.0)
+    overall_status.text(translation_manager.get_text('analysis_complete'))
+
+    st.success(f"🎉 Complete analysis finished in {total_minutes}m {total_seconds}s")
+    st.info(f"⏱️ Breakdown: Data analysis - {minutes}m {seconds}s, Excel generation - {excel_minutes}m {excel_seconds}s")
+    
+    # Save results
+    state.analysis_results = {
+        'analysis_duration': total_duration,
+        'data_analysis_time': analysis_duration,
+        'excel_generation_time': excel_duration,
+        'analyzed_stats': analyzed_stats,
+        'citing_stats': citing_stats,
+        'enhanced_stats': enhanced_stats,
+        'citation_timing': citation_timing,
+        'overlap_details': overlap_details,
+        'fast_metrics': fast_metrics,
+        'additional_data': additional_data,
+        'journal_name': journal_name,
+        'issn': issn,
+        'period': period_str,
+        'n_analyzed': n_analyzed,
+        'n_citing': n_citing
+    }
+    
+    # Add special analysis metrics to results if available
+    if state.is_special_analysis:
+        state.analysis_results['special_analysis_metrics'] = additional_data.get('special_analysis_metrics', {})
+    
+    state.analysis_complete = True
+    
+    # Clear old caches to free memory
+    clear_old_cache()
+    
+    time.sleep(1)
+    overall_progress.empty()
+    overall_status.empty()
+
+    # Останавливаем таймер
+    stop_timer = True
+    timer_thread.join(timeout=1)
+    
+    # Финальное отображение времени
+    elapsed_time = time.time() - analysis_start_time
+    minutes = int(elapsed_time // 60)
+    seconds = int(elapsed_time % 60)
+    timer_container.success(f"✅ Total analysis completed in: {minutes:02d}:{seconds:02d}")
+    
+    # Функция для обновления счетчика общего времени
+    def update_timer():
+        elapsed_time = time.time() - analysis_start_time
+        minutes = int(elapsed_time // 60)
+        seconds = int(elapsed_time % 60)
+        timer_container.info(f"⏱️ Total analysis time: {minutes:02d}:{seconds:02d}")
+    
+    # Запускаем обновление таймера в отдельном потоке
+    import threading
+    stop_timer = False
+    
+    def timer_thread():
+        while not stop_timer:
+            update_timer()
+            time.sleep(1)  # Обновляем каждую секунду
+    
+    timer_thread = threading.Thread(target=timer_thread, daemon=True)
+    timer_thread.start()
+    
+    # Set analysis modes
+    state.is_special_analysis = special_analysis
+    state.include_ror_data = include_ror_data
+    state.include_author_id_data = include_author_id_data
+    
+    # Predictive cache warmup
+    predictive_cache_warmup(issn)
+    
+    # Load metrics data in background
+    load_metrics_data()
+    
+    # Overall progress
+    overall_progress = st.progress(0)
+    overall_status = st.empty()
+    
+    # Period parsing
+    overall_status.text(translation_manager.get_text('parsing_period'))
+    
+    if state.is_special_analysis:
+        current_date = datetime.now()
+        from_date = (current_date - timedelta(days=1580)).strftime('%Y-%m-%d')
+        until_date = (current_date - timedelta(days=120)).strftime('%Y-%m-%d')
+        years = [current_date.year - 4, current_date.year - 3, current_date.year - 2, current_date.year - 1]
+        st.info(f"🔬 Special Analysis Mode: Using fixed period {from_date} to {until_date}")
+    else:
+        years = parse_period(period_str)
+        if not years:
+            return
+        from_date = f"{min(years)}-01-01"
+        until_date = f"{max(years)}-12-31"
+    
+    overall_progress.progress(0.1)
+    
+    # Journal name (optimized with caching)
+    overall_status.text(translation_manager.get_text('getting_journal_name'))
+    journal_name = optimized_get_journal_name(issn)
+    st.success(translation_manager.get_text('journal_found').format(journal_name=journal_name, issn=issn))
+    overall_progress.progress(0.2)
+    
+    # Article retrieval
+    overall_status.text(translation_manager.get_text('loading_articles'))
+    items = fetch_articles_by_issn_period(issn, from_date, until_date)
+    if not items:
+        st.error(translation_manager.get_text('no_articles_found'))
+        return
+
+    n_analyzed = len(items)
+    st.success(translation_manager.get_text('articles_found').format(count=n_analyzed))
+    overall_progress.progress(0.3)
+    
+    # Data validation
+    overall_status.text(translation_manager.get_text('validating_data'))
+    validated_items = validate_and_clean_data(items)
+    journal_prefix = get_doi_prefix(validated_items[0].get('DOI', '')) if validated_items else ''
+    overall_progress.progress(0.4)
+    
+    # PARALLEL: Analyzed articles processing
+    overall_status.text(translation_manager.get_text('processing_articles'))
+    
+    analyzed_metadata = []
+    dois = [item.get('DOI') for item in validated_items if item.get('DOI')]
+    
+    # Use parallel metadata loading
+    meta_progress = st.progress(0)
+    meta_status = st.empty()
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(parallel_metadata_loading, doi, state): doi for doi in dois}
+        
+        for i, future in enumerate(as_completed(futures)):
+            doi = futures[future]
+            try:
+                result = future.result()
+                analyzed_metadata.append({
+                    'doi': doi,
+                    'crossref': result['crossref'],
+                    'openalex': result['openalex']
+                })
+            except Exception as e:
+                st.error(f"Error processing DOI {doi}: {e}")
+            
+            progress = (i + 1) / len(dois)
+            meta_progress.progress(progress)
+            meta_status.text(f"{translation_manager.get_text('getting_metadata')}: {i + 1}/{len(dois)}")
+    
+    meta_progress.empty()
+    meta_status.empty()
+    overall_progress.progress(0.6)
+    
+    # PARALLEL: Citing works retrieval and processing
+    overall_status.text(translation_manager.get_text('collecting_citations'))
+    
+    all_citing_metadata = []
+    analyzed_dois = [am['doi'] for am in analyzed_metadata if am.get('doi')]
+    
+    citing_progress = st.progress(0)
+    citing_status = st.empty()
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(get_citing_dois_and_metadata, (doi, state)): doi for doi in analyzed_dois}
+        
+        for i, future in enumerate(as_completed(futures)):
+            doi = futures[future]
+            try:
+                citings = future.result()
+                all_citing_metadata.extend(citings)
+            except Exception as e:
+                st.error(f"Error collecting citations for {doi}: {e}")
+            
+            progress = (i + 1) / len(analyzed_dois)
+            citing_progress.progress(progress)
+            citing_status.text(f"{translation_manager.get_text('collecting_citations_progress')}: {i + 1}/{len(analyzed_dois)}")
+    
+    citing_progress.empty()
+    citing_status.empty()
+    
+    # Unique citing works
+    unique_citing_dois = set(c['doi'] for c in all_citing_metadata if c.get('doi'))
+    n_citing = len(unique_citing_dois)
+    st.success(translation_manager.get_text('unique_citing_works').format(count=n_citing))
+    overall_progress.progress(0.7)
+    
+    # PARALLEL: Statistics and metrics calculation
+    overall_status.text(translation_manager.get_text('calculating_statistics'))
+    
+    # Use parallel metrics calculation
+    stats_progress = st.progress(0)
+    stats_status = st.empty()
+    
+    # Start parallel calculations
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_analyzed_stats = executor.submit(extract_stats_from_metadata, analyzed_metadata, journal_prefix=journal_prefix)
+        future_citing_stats = executor.submit(extract_stats_from_metadata, all_citing_metadata, is_analyzed=False)
+        future_parallel_metrics = executor.submit(parallel_metrics_calculation, analyzed_metadata, all_citing_metadata, state, issn)
+        
+        # Wait for completion with progress updates
+        stats_status.text("Calculating analyzed statistics...")
+        analyzed_stats = future_analyzed_stats.result()
+        stats_progress.progress(0.33)
+        
+        stats_status.text("Calculating citing statistics...")
+        citing_stats = future_citing_stats.result()
+        stats_progress.progress(0.66)
+        
+        stats_status.text("Calculating advanced metrics...")
+        parallel_metrics = future_parallel_metrics.result()
+        stats_progress.progress(1.0)
+    
+    stats_progress.empty()
+    stats_status.empty()
+    
+    # Extract results from parallel metrics
+    enhanced_stats = parallel_metrics['basic']
+    fast_metrics = parallel_metrics['fast']
+    citation_timing = parallel_metrics['timing']
+    overlap_details = parallel_metrics['overlap']
+    
+    # PARALLEL: Additional analyses
+    overall_status.text("Calculating additional insights...")
+    
+    additional_data = parallel_analyses(
+        analyzed_metadata, 
+        all_citing_metadata, 
+        state, 
+        citation_timing['days_median'],
+        analyzed_stats,  # передаем статистику
+        citing_stats     # передаем статистику
+    )
+    
     # Add special analysis metrics if available
     if state.is_special_analysis and 'special_analysis' in additional_data:
         additional_data['special_analysis_metrics'] = additional_data['special_analysis']
@@ -6910,6 +7240,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
