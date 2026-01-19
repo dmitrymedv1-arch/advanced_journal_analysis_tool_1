@@ -5308,7 +5308,7 @@ def collect_terms_topics_statistics(analyzed_metadata, citing_metadata):
 def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
     """Create enhanced Excel report with error handling for large data"""
     
-    # ДОБАВИТЬ В НАЧАЛО ФУНКЦИИ:
+    # ДОБАВИТЬ В НАЧАЛЕ ФУНКЦИИ:
     state = get_analysis_state()
     precomputed_data = precompute_excel_data(
         analyzed_data, citing_data, analyzed_stats, citing_stats, 
@@ -5932,7 +5932,6 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 special_metrics_df = pd.DataFrame(special_metrics_data)
                 special_metrics_df.to_excel(writer, sheet_name='Special_Analysis_Metrics', index=False)
 
-            # === NEW SHEET: Author ID Data ===
             # Sheet 20: Author_ID_data (NEW)
             if state.include_author_id_data:
                 # Получаем данные из additional_data
@@ -5940,15 +5939,39 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 author_id_data = author_id_info.get('author_id_data', [])
                 
                 if author_id_data:
+                    # Преобразуем данные в DataFrame
                     author_id_df = pd.DataFrame(author_id_data)
+                    
+                    # Удаляем временную колонку DOIs Count если есть
+                    if 'DOIs Count' in author_id_df.columns:
+                        author_id_df = author_id_df.drop(columns=['DOIs Count'])
+                    
+                    # Убедимся, что все нужные колонки есть
+                    expected_columns = [
+                        'Full Name', 'Surname', 'Given Name', 'Affiliation', '.',
+                        'ORCID ID', 'Scopus ID', 'WoS ID', 'Sources', 'All Affiliations'
+                    ]
+                    
+                    for col in expected_columns:
+                        if col not in author_id_df.columns:
+                            author_id_df[col] = ''
+                    
+                    # Записываем в Excel
+                    author_id_df = author_id_df[expected_columns]  # Упорядочиваем колонки
                     author_id_df.to_excel(writer, sheet_name='Author_ID_data', index=False)
+                    
+                    st.success(f"✅ Author ID data saved: {len(author_id_df)} authors")
                 else:
-                    # Если данных нет, создаем пустой лист с сообщением
+                    # Если данных нет, создаем лист с информацией
                     empty_df = pd.DataFrame({
-                        'Message': ['Author ID data is being processed or not available. Check the analysis logs.']
+                        'Status': ['Author ID data processing'],
+                        'Message': [f'Author ID data was requested but no data was collected. This might be because:'],
+                        'Possible Reasons': ['1. No authors found in the metadata'],
+                        '': ['2. ORCID extraction failed'],
+                        'Check': ['3. Check the console logs for details']
                     })
                     empty_df.to_excel(writer, sheet_name='Author_ID_data', index=False)
-
+            
             # Ensure at least one sheet exists
             if len(writer.sheets) == 0:
                 summary_df = pd.DataFrame({
@@ -7240,6 +7263,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
