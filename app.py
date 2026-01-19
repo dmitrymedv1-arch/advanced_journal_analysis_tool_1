@@ -6646,14 +6646,14 @@ def main_optimized():
         include_author_id_data = st.checkbox(
             "👤 Include Author ID data", 
             value=False,
-            help="Include Author ID data (ORCID, Scopus ID, WoS ID) in Author_ID_data sheet (may significantly increase processing time; **please do not select for a large number of analyzed or citing papers**)"
+            help="Include ORCID ID data in Author_ID_data sheet"
         )
         
         if include_ror_data:
             st.info("🔍 ROR Data: Organization information will be included in Combined_Affiliations sheet")
         
         if include_author_id_data:
-            st.info("👤 Author ID Data: Author identifiers (ORCID, Scopus ID, WoS ID) will be included in Author_ID_data sheet")
+            st.info("👤 ORCID ID data will be included in Author_ID_data sheet")
         
         st.markdown("---")
         st.header("📚 " + translation_manager.get_text('dictionary_of_terms'))
@@ -6828,4 +6828,5 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
