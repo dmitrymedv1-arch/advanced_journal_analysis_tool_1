@@ -29,6 +29,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import diskcache
 from functools import wraps
+from collections import defaultdict
 
 # Import translation manager
 from languages import translation_manager
@@ -4262,6 +4263,171 @@ def search_ror_organization_cached(affiliation_name, cache_dict):
     
     return colab_ror, website
 
+# === NEW FUNCTIONS FOR JOURNAL WEBSITE EXTRACTION ===
+
+def get_journal_website_from_openalex(openalex_source_id):
+    """Получает веб-сайт журнала из OpenAlex API по его source_id"""
+    if not openalex_source_id:
+        return None
+    
+    cache_key = f"journal_website_{openalex_source_id}"
+    state = get_analysis_state()
+    
+    # Проверяем кэш
+    if cache_key in state.journal_cache:
+        return state.journal_cache[cache_key]
+    
+    try:
+        # Извлекаем ID из URL формата "https://openalex.org/S2764437742"
+        if openalex_source_id.startswith('https://openalex.org/'):
+            source_id = openalex_source_id.split('/')[-1].lower()
+        else:
+            source_id = openalex_source_id.lower()
+        
+        # Запрашиваем данные журнала
+        url = f"https://api.openalex.org/sources/{source_id}"
+        
+        # Используем rate limiter
+        rate_limiter.wait_if_needed()
+        
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        journal_data = response.json()
+        
+        # Извлекаем homepage_url
+        website = journal_data.get('homepage_url')
+        
+        if website:
+            # Нормализуем URL
+            if not website.startswith(('http://', 'https://')):
+                website = f"https://{website}"
+            
+            # Сохраняем в кэш
+            state.journal_cache[cache_key] = website
+            print(f"✅ Found website for {source_id}: {website}")
+            return website
+        else:
+            print(f"❌ No website found for {source_id}")
+            state.journal_cache[cache_key] = None
+            return None
+            
+    except Exception as e:
+        print(f"⚠️ Error fetching website for {openalex_source_id}: {str(e)}")
+        state.journal_cache[cache_key] = None
+        return None
+
+def extract_journal_openalex_id(work_data):
+    """Извлекает OpenAlex source_id из данных работы"""
+    if not work_data:
+        return None
+    
+    # Проверяем host_venue в OpenAlex данных
+    if isinstance(work_data, dict) and 'host_venue' in work_data:
+        host_venue = work_data['host_venue']
+        if host_venue and 'id' in host_venue:
+            return host_venue['id']
+    
+    return None
+
+def get_journal_website_for_work(work_data):
+    """Получает веб-сайт журнала для конкретной работы"""
+    if not work_data:
+        return None
+    
+    # Извлекаем OpenAlex source_id
+    openalex_source_id = extract_journal_openalex_id(work_data.get('openalex'))
+    
+    if openalex_source_id:
+        return get_journal_website_from_openalex(openalex_source_id)
+    
+    return None
+
+def batch_get_journal_websites(journal_names, analyzed_data, citing_data):
+    """Пакетное получение веб-сайтов журналов из всех доступных данных"""
+    websites_cache = {}
+    
+    # Собираем все работы для анализа
+    all_works = []
+    
+    # Добавляем анализируемые работы
+    for item in analyzed_data:
+        if item and item.get('openalex'):
+            all_works.append(item.get('openalex'))
+    
+    # Добавляем цитирующие работы
+    for item in citing_data:
+        if item and item.get('openalex'):
+            all_works.append(item.get('openalex'))
+    
+    print(f"🔍 Analyzing {len(all_works)} works for journal websites...")
+    
+    # Создаем словарь журнал -> список source_ids
+    journal_to_source_ids = {}
+    
+    for work in all_works:
+        if not work:
+            continue
+            
+        # Получаем название журнала
+        journal_name = None
+        if work.get('host_venue'):
+            journal_name = work['host_venue'].get('display_name')
+        elif work.get('primary_location', {}).get('source', {}).get('display_name'):
+            journal_name = work['primary_location']['source']['display_name']
+        
+        if not journal_name:
+            continue
+        
+        # Получаем source_id
+        source_id = extract_journal_openalex_id(work)
+        if not source_id:
+            continue
+        
+        if journal_name not in journal_to_source_ids:
+            journal_to_source_ids[journal_name] = set()
+        
+        journal_to_source_ids[journal_name].add(source_id)
+    
+    # Для каждого журнала в списке ищем веб-сайт
+    for journal_name in journal_names:
+        if not journal_name or journal_name in websites_cache:
+            continue
+        
+        website = None
+        
+        # Пробуем найти через source_ids, которые у нас есть
+        if journal_name in journal_to_source_ids:
+            for source_id in journal_to_source_ids[journal_name]:
+                website = get_journal_website_from_openalex(source_id)
+                if website:
+                    break
+        
+        # Если не нашли, пробуем поискать в API по названию
+        if not website:
+            try:
+                # Эвристический поиск по названию
+                search_name = journal_name.replace(' ', '%20')
+                url = f"https://api.openalex.org/sources?search={search_name}&per-page=1"
+                
+                rate_limiter.wait_if_needed()
+                response = requests.get(url, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('results') and len(data['results']) > 0:
+                        result = data['results'][0]
+                        if result.get('display_name', '').lower() == journal_name.lower():
+                            website = result.get('homepage_url')
+                            if website and not website.startswith(('http://', 'https://')):
+                                website = f"https://{website}"
+            except Exception as e:
+                print(f"⚠️ Error searching for journal {journal_name}: {str(e)}")
+        
+        websites_cache[journal_name] = website or ""
+    
+    return websites_cache
+
 # === NEW FUNCTION: PARALLEL ROR PROCESSING WITH PROGRESS BAR ===
 def process_ror_data_parallel(affiliations_list, state):
     """Process ROR data for affiliations in parallel with progress bar"""
@@ -5593,10 +5759,16 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 combined_countries_df = pd.DataFrame(combined_countries_data)
                 combined_countries_df.to_excel(writer, sheet_name='Combined_Countries', index=False)
 
-            # Sheet 12: All journals citing (with percentages) - UPDATED VERSION WITH CS DATA
+            # Sheet 12: All journals citing (with percentages) - UPDATED VERSION WITH WEBSITE COLUMN
             if citing_stats['all_journals']:
                 all_citing_journals_data = []
                 total_citing_articles = safe_convert(citing_stats['n_items'])
+                
+                # Получаем список всех журналов для поиска веб-сайтов
+                journal_names = [journal_info[0] for journal_info in citing_stats['all_journals']]
+                
+                # Получаем веб-сайты журналов (с кэшированием)
+                journal_websites = batch_get_journal_websites(journal_names, analyzed_data, citing_data)
                 
                 # Load metrics data if not already loaded
                 if get_analysis_state().if_data is None or get_analysis_state().cs_data is None:
@@ -5629,6 +5801,9 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     issn_1 = journal_issns[0] if len(journal_issns) > 0 else ""
                     issn_2 = journal_issns[1] if len(journal_issns) > 1 else ""
                     
+                    # Get website for this journal
+                    website = journal_websites.get(journal_name, "")
+                    
                     # Get metrics for this journal - UPDATED WITH CS DATA
                     metrics = get_journal_metrics(journal_issns)
                     
@@ -5636,6 +5811,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Journal': safe_convert(journal_name),
                         'ISSN_1': safe_convert(issn_1),
                         'ISSN_2': safe_convert(issn_2),
+                        'Journal_Website': safe_convert(website),
                         'Articles_Count': safe_convert(count),
                         'Percentage': round(percentage, 2),
                         '': '',  # Empty column
@@ -6828,3 +7004,4 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
