@@ -937,6 +937,151 @@ class OpenAlexClient(APIClientBase):
         
         return None
 
+    def get_journal_info_with_website(issn_or_id, state):
+        """Get journal information including website URL from OpenAlex with caching"""
+        cache_key = f"journal_website_{issn_or_id}"
+        
+        if cache_key in state.openalex_cache:
+            return state.openalex_cache[cache_key]
+        
+        try:
+            # Проверяем, это ли это уже ID OpenAlex
+            if isinstance(issn_or_id, str) and issn_or_id.startswith('https://openalex.org/'):
+                journal_id = issn_or_id.split('/')[-1]
+                url = f"https://api.openalex.org/sources/{journal_id}"
+            else:
+                # Ищем по ISSN
+                url = f"https://api.openalex.org/sources?filter=issn:{issn_or_id}"
+            
+            rate_limiter.wait_if_needed()
+            resp = requests.get(url, timeout=10)
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                
+                if isinstance(issn_or_id, str) and issn_or_id.startswith('https://openalex.org/'):
+                    # Прямой запрос по ID
+                    journal_data = data
+                else:
+                    # Запрос по ISSN
+                    if data.get('meta', {}).get('count', 0) > 0:
+                        journal_data = data['results'][0]
+                    else:
+                        return None
+                
+                # Извлекаем информацию
+                result = {
+                    'id': journal_data.get('id'),
+                    'display_name': journal_data.get('display_name', ''),
+                    'homepage_url': journal_data.get('homepage_url'),
+                    'issn': journal_data.get('issn', []),
+                    'publisher': journal_data.get('host_organization_name', '')
+                }
+                
+                # Сохраняем в кэш
+                state.openalex_cache[cache_key] = result
+                return result
+                
+        except Exception as e:
+            print(f"Error fetching journal info for {issn_or_id}: {e}")
+        
+        return None
+    
+    def get_journal_website_cached(journal_info, state):
+        """Get journal website URL with caching"""
+        if not journal_info:
+            return ""
+        
+        # Пробуем получить из кэша по названию журнала
+        journal_name = journal_info.get('display_name', '') or journal_info.get('name', '')
+        if journal_name:
+            cache_key = f"journal_website_name_{journal_name}"
+            if cache_key in state.openalex_cache:
+                return state.openalex_cache[cache_key]
+        
+        # Пробуем получить по ISSN
+        website_url = ""
+        issns = journal_info.get('issn', [])
+        if isinstance(issns, str):
+            issns = [issns]
+        
+        for issn in issns:
+            if issn:
+                journal_data = get_journal_info_with_website(issn, state)
+                if journal_data and journal_data.get('homepage_url'):
+                    website_url = journal_data['homepage_url']
+                    break
+        
+        # Если не нашли по ISSN, пробуем по ID OpenAlex
+        if not website_url and 'id' in journal_info:
+            journal_data = get_journal_info_with_website(journal_info['id'], state)
+            if journal_data and journal_data.get('homepage_url'):
+                website_url = journal_data['homepage_url']
+        
+        # Кэшируем результат
+        if journal_name and website_url:
+            cache_key = f"journal_website_name_{journal_name}"
+            state.openalex_cache[cache_key] = website_url
+        
+        return website_url
+
+    def batch_get_journal_websites(journal_names, state):
+        """Batch get website URLs for multiple journals to minimize API calls"""
+        results = {}
+        
+        # Подготовка списка журналов для обработки
+        journals_to_process = []
+        for journal_name in journal_names:
+            # Проверяем кэш
+            cache_key = f"journal_website_name_{journal_name}"
+            if cache_key in state.openalex_cache:
+                results[journal_name] = state.openalex_cache[cache_key]
+            else:
+                journals_to_process.append(journal_name)
+        
+        if not journals_to_process:
+            return results
+        
+        print(f"🔍 Batch processing website URLs for {len(journals_to_process)} journals...")
+        
+        # Обрабатываем в батчах
+        batch_size = 10
+        for i in range(0, len(journals_to_process), batch_size):
+            batch = journals_to_process[i:i + batch_size]
+            
+            for journal_name in batch:
+                try:
+                    # Ищем журнал в OpenAlex по названию
+                    search_url = f"https://api.openalex.org/sources?filter=display_name.search:{requests.utils.quote(journal_name)}&per-page=1"
+                    
+                    rate_limiter.wait_if_needed()
+                    resp = requests.get(search_url, timeout=10)
+                    
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get('meta', {}).get('count', 0) > 0:
+                            journal_data = data['results'][0]
+                            website_url = journal_data.get('homepage_url', '')
+                            
+                            # Сохраняем в кэш
+                            cache_key = f"journal_website_name_{journal_name}"
+                            state.openalex_cache[cache_key] = website_url
+                            results[journal_name] = website_url
+                        else:
+                            results[journal_name] = ""
+                    else:
+                        results[journal_name] = ""
+                        
+                except Exception as e:
+                    print(f"Error fetching website for {journal_name}: {e}")
+                    results[journal_name] = ""
+            
+            # Небольшая задержка между батчами
+            if i + batch_size < len(journals_to_process):
+                time.sleep(0.5)
+        
+        return results
+
 # =============================================================================
 # DATA PROCESSORS (ORIGINAL)
 # =============================================================================
@@ -1769,10 +1914,13 @@ def extract_affiliations_and_countries(openalex_data):
 
 # === 7. Journal Information Extraction ===
 def extract_journal_info(metadata):
+    """Extract journal information from metadata including OpenAlex ID"""
     journal_info = {
         'issn': [],
         'journal_name': '',
-        'publisher': ''
+        'publisher': '',
+        'openalex_id': None,
+        'display_name': ''
     }
     
     if not metadata:
@@ -1794,6 +1942,10 @@ def extract_journal_info(metadata):
                 journal_info['publisher'] = host_venue.get('publisher', '')
             if not journal_info['issn']:
                 journal_info['issn'] = host_venue.get('issn', [])
+            
+            # Получаем OpenAlex ID и display_name
+            journal_info['openalex_id'] = host_venue.get('id')
+            journal_info['display_name'] = host_venue.get('display_name', '')
     
     return journal_info
 
@@ -4995,6 +5147,12 @@ def precompute_excel_data(analyzed_data, citing_data, analyzed_stats, citing_sta
     special_metrics = additional_data.get('special_analysis_metrics', {})
     analyzed_articles_usage = special_metrics.get('debug_info', {}).get('analyzed_articles_usage', {})
     citing_articles_usage = special_metrics.get('debug_info', {}).get('citing_articles_usage', {})
+
+    if citing_stats.get('all_journals'):
+        journal_names = [journal_info[0] for journal_info in citing_stats['all_journals'][:50]]  # Берем топ-50 для оптимизации
+        print(f"🔍 Pre-fetching website URLs for {len(journal_names)} journals...")
+        website_urls = batch_get_journal_websites(journal_names, state)
+        print(f"✅ Pre-fetched {len(website_urls)} website URLs")
     
     return {
         'analyzed_precomputed': analyzed_precomputed,
@@ -5593,7 +5751,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 combined_countries_df = pd.DataFrame(combined_countries_data)
                 combined_countries_df.to_excel(writer, sheet_name='Combined_Countries', index=False)
 
-            # Sheet 12: All journals citing (with percentages) - UPDATED VERSION WITH CS DATA
+            # Sheet 12: All journals citing (with percentages) - UPDATED VERSION WITH CS DATA AND WEBSITE
             if citing_stats['all_journals']:
                 all_citing_journals_data = []
                 total_citing_articles = safe_convert(citing_stats['n_items'])
@@ -5601,6 +5759,10 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 # Load metrics data if not already loaded
                 if get_analysis_state().if_data is None or get_analysis_state().cs_data is None:
                     load_metrics_data()
+                
+                # Подготовка списка журналов для batch получения сайтов
+                journal_names = [journal_info[0] for journal_info in citing_stats['all_journals']]
+                website_urls = batch_get_journal_websites(journal_names, state)
                 
                 for journal_info in citing_stats['all_journals']:
                     journal_name = journal_info[0]
@@ -5629,13 +5791,17 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     issn_1 = journal_issns[0] if len(journal_issns) > 0 else ""
                     issn_2 = journal_issns[1] if len(journal_issns) > 1 else ""
                     
-                    # Get metrics for this journal - UPDATED WITH CS DATA
+                    # Get website URL from cache
+                    website_url = website_urls.get(journal_name, "")
+                    
+                    # Get metrics for this journal
                     metrics = get_journal_metrics(journal_issns)
                     
                     all_citing_journals_data.append({
                         'Journal': safe_convert(journal_name),
                         'ISSN_1': safe_convert(issn_1),
                         'ISSN_2': safe_convert(issn_2),
+                        'Journal_Website': safe_convert(website_url) if website_url else "",
                         'Articles_Count': safe_convert(count),
                         'Percentage': round(percentage, 2),
                         '': '',  # Empty column
@@ -6828,5 +6994,6 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
