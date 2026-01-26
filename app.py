@@ -1029,56 +1029,82 @@ class OpenAlexClient(APIClientBase):
         """Batch get website URLs for multiple journals to minimize API calls"""
         results = {}
         
+        # Нормализуем названия журналов для консистентности
+        normalized_to_original = {}
+        for journal_name in journal_names:
+            normalized = normalize_journal_name(journal_name)
+            normalized_to_original[normalized] = journal_name
+        
         # Подготовка списка журналов для обработки
         journals_to_process = []
-        for journal_name in journal_names:
+        for normalized_name, original_name in normalized_to_original.items():
             # Проверяем кэш
-            cache_key = f"journal_website_name_{journal_name}"
+            cache_key = f"journal_website_{normalized_name}"
             if cache_key in state.openalex_cache:
-                results[journal_name] = state.openalex_cache[cache_key]
+                results[original_name] = state.openalex_cache[cache_key]
             else:
-                journals_to_process.append(journal_name)
+                journals_to_process.append((normalized_name, original_name))
         
         if not journals_to_process:
             return results
         
         print(f"🔍 Batch processing website URLs for {len(journals_to_process)} journals...")
         
-        # Обрабатываем в батчах
+        # Обрабатываем в батчах с использованием нормализованных названий
         batch_size = 10
         for i in range(0, len(journals_to_process), batch_size):
             batch = journals_to_process[i:i + batch_size]
             
-            for journal_name in batch:
+            for normalized_name, original_name in batch:
                 try:
                     # Ищем журнал в OpenAlex по названию
-                    search_url = f"https://api.openalex.org/sources?filter=display_name.search:{requests.utils.quote(journal_name)}&per-page=1"
+                    search_query = requests.utils.quote(normalized_name)
+                    search_url = f"https://api.openalex.org/sources?filter=display_name.search:{search_query}&per-page=3"
                     
                     rate_limiter.wait_if_needed()
-                    resp = requests.get(search_url, timeout=10)
+                    resp = requests.get(search_url, timeout=15)
                     
                     if resp.status_code == 200:
                         data = resp.json()
                         if data.get('meta', {}).get('count', 0) > 0:
-                            journal_data = data['results'][0]
-                            website_url = journal_data.get('homepage_url', '')
+                            # Найдем наиболее подходящий журнал
+                            best_match = None
+                            best_score = 0
+                            
+                            for journal_data in data['results']:
+                                result_name = journal_data.get('display_name', '').lower()
+                                # Простое сравнение строк
+                                if normalized_name in result_name or result_name in normalized_name:
+                                    score = len(set(normalized_name.split()) & set(result_name.split()))
+                                    if score > best_score:
+                                        best_score = score
+                                        best_match = journal_data
+                            
+                            if best_match:
+                                website_url = best_match.get('homepage_url', '')
+                            else:
+                                website_url = data['results'][0].get('homepage_url', '')
                             
                             # Сохраняем в кэш
-                            cache_key = f"journal_website_name_{journal_name}"
+                            cache_key = f"journal_website_{normalized_name}"
                             state.openalex_cache[cache_key] = website_url
-                            results[journal_name] = website_url
+                            results[original_name] = website_url
                         else:
-                            results[journal_name] = ""
+                            results[original_name] = ""
                     else:
-                        results[journal_name] = ""
+                        results[original_name] = ""
                         
                 except Exception as e:
-                    print(f"Error fetching website for {journal_name}: {e}")
-                    results[journal_name] = ""
+                    print(f"Error fetching website for {original_name}: {e}")
+                    results[original_name] = ""
             
             # Небольшая задержка между батчами
             if i + batch_size < len(journals_to_process):
                 time.sleep(0.5)
+        
+        # Статистика
+        found_count = sum(1 for url in results.values() if url)
+        print(f"✅ Found websites for {found_count}/{len(journal_names)} journals ({found_count/len(journal_names)*100:.1f}%)")
         
         return results
 
@@ -3886,6 +3912,28 @@ def normalize_author_name(author_name):
         first_initial = initials[0] + '.' if len(initials) > 0 else ''
     
     return f"{surname} {first_initial}".strip()
+
+def normalize_journal_name(journal_name):
+    """Normalize journal name for consistent comparison"""
+    if not journal_name:
+        return ""
+    
+    # Приводим к нижнему регистру, убираем лишние пробелы
+    normalized = journal_name.strip().lower()
+    
+    # Убираем общие префиксы и суффиксы
+    prefixes_to_remove = ['the ', 'journal of ', 'j. of ', 'j ']
+    for prefix in prefixes_to_remove:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+    
+    # Убираем пунктуацию
+    normalized = re.sub(r'[^\w\s]', '', normalized)
+    
+    # Убираем лишние пробелы
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    
+    return normalized
 
 def normalize_keywords_data(keywords_data):
     """Нормализация данных ключевых слов для объединенного листа"""
@@ -6994,6 +7042,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
