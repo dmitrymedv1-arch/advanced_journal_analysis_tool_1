@@ -228,7 +228,7 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
         else:
             future_ror = None
         
-        # Collect results
+        # Collect results - ИСПРАВЛЕНО: гарантируем получение всех результатов
         try:
             keywords_result = future_keywords.result()
         except Exception as e:
@@ -1574,6 +1574,7 @@ def parse_period(period_str):
         return []
     return sorted(years)
 
+# --- Data Validation ---
 def validate_and_clean_data(items):
     validated = []
     skipped_count = 0
@@ -1587,10 +1588,9 @@ def validate_and_clean_data(items):
         if not doi.startswith('10.'):
             skipped_count += 1
             continue
-        
-        # Используем новую функцию для извлечения даты
-        publication_date = extract_publication_date_from_crossref(item)
-        if not publication_date or publication_date.year < 1900:
+            
+        date_parts = item.get('created', {}).get('date-parts', [[]])[0]
+        if not date_parts or date_parts[0] < 1900:
             skipped_count += 1
             continue
             
@@ -1684,16 +1684,6 @@ def get_unified_metadata(args):
     cr_data = get_crossref_metadata(doi, state)
     oa_data = get_openalex_metadata(doi, state)
     
-    # Добавляем правильную дату публикации в crossref данные
-    if cr_data:
-        publication_date = extract_publication_date_from_crossref(cr_data)
-        if publication_date:
-            # Добавляем поле publication_date в данные для удобства
-            cr_data['publication_date_extracted'] = {
-                'date': publication_date,
-                'date_parts': [[publication_date.year, publication_date.month, publication_date.day]]
-            }
-    
     result = {'crossref': cr_data, 'openalex': oa_data}
     state.unified_cache[doi] = result
     return result
@@ -1725,22 +1715,12 @@ def get_citing_dois_and_metadata(args):
                         if c_doi:
                             if c_doi not in state.crossref_cache:
                                 get_crossref_metadata(c_doi, state)
-                            
-                            # Получаем дату публикации из Crossref
-                            cr_data = state.crossref_cache.get(c_doi)
-                            pub_date_str = None
-                            if cr_data:
-                                publication_date = extract_publication_date_from_crossref(cr_data)
-                                if publication_date:
-                                    pub_date_str = publication_date.isoformat()
-                            
                             if c_doi not in state.openalex_cache:
                                 get_openalex_metadata(c_doi, state)
-                            
                             citing_list.append({
                                 'doi': c_doi,
-                                'pub_date': pub_date_str or w.get('publication_date'),
-                                'crossref': cr_data,
+                                'pub_date': w.get('publication_date'),
+                                'crossref': state.crossref_cache.get(c_doi),
                                 'openalex': state.openalex_cache.get(c_doi)
                             })
                     cursor = data['meta'].get('next_cursor')
@@ -1853,19 +1833,7 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
                 if resp.status_code == 200:
                     data = resp.json()
                     new_items = data['message']['items']
-                    
-                    # Фильтруем статьи по правильной дате публикации
-                    filtered_items = []
-                    for item in new_items:
-                        publication_date = extract_publication_date_from_crossref(item)
-                        if publication_date:
-                            # Преобразуем дату в строку формата YYYY-MM-DD для сравнения
-                            date_str = publication_date.strftime('%Y-%m-%d')
-                            # Проверяем, что дата попадает в диапазон
-                            if date_str >= from_date and date_str <= until_date:
-                                filtered_items.append(item)
-                    
-                    items.extend(filtered_items)
+                    items.extend(new_items)
                     cursor = data['message'].get('next-cursor')
                     
                     status_text.text(f"📥 {translation_manager.get_text('loaded_articles').format(count=len(items))}")
@@ -1892,83 +1860,6 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
     progress_container.empty()
     
     return items
-
-def extract_publication_date_from_crossref(crossref_item):
-    """
-    Извлекает дату публикации из данных Crossref с учетом всех возможных полей.
-    Приоритет полей:
-    1. published-print (для печатных версий)
-    2. journal-issue.published-online (для даты выпуска онлайн-версии)
-    3. published-online (для даты публикации онлайн)
-    4. created (дата создания записи в Crossref)
-    5. deposited (дата депозита)
-    """
-    if not crossref_item:
-        return None
-    
-    # 1. Пробуем published-print
-    if 'published-print' in crossref_item:
-        date_parts = crossref_item['published-print'].get('date-parts', [[]])[0]
-        if date_parts and len(date_parts) >= 1:
-            try:
-                year = date_parts[0]
-                month = date_parts[1] if len(date_parts) > 1 else 1
-                day = date_parts[2] if len(date_parts) > 2 else 1
-                return datetime(year, month, day)
-            except (ValueError, TypeError):
-                pass
-    
-    # 2. Пробуем journal-issue.published-online (дата выпуска)
-    if 'journal-issue' in crossref_item:
-        journal_issue = crossref_item['journal-issue']
-        if 'published-online' in journal_issue:
-            date_parts = journal_issue['published-online'].get('date-parts', [[]])[0]
-            if date_parts and len(date_parts) >= 1:
-                try:
-                    year = date_parts[0]
-                    month = date_parts[1] if len(date_parts) > 1 else 1
-                    day = date_parts[2] if len(date_parts) > 2 else 1
-                    return datetime(year, month, day)
-                except (ValueError, TypeError):
-                    pass
-    
-    # 3. Пробуем published-online
-    if 'published-online' in crossref_item:
-        date_parts = crossref_item['published-online'].get('date-parts', [[]])[0]
-        if date_parts and len(date_parts) >= 1:
-            try:
-                year = date_parts[0]
-                month = date_parts[1] if len(date_parts) > 1 else 1
-                day = date_parts[2] if len(date_parts) > 2 else 1
-                return datetime(year, month, day)
-            except (ValueError, TypeError):
-                pass
-    
-    # 4. Пробуем created
-    if 'created' in crossref_item:
-        date_parts = crossref_item['created'].get('date-parts', [[]])[0]
-        if date_parts and len(date_parts) >= 1:
-            try:
-                year = date_parts[0]
-                month = date_parts[1] if len(date_parts) > 1 else 1
-                day = date_parts[2] if len(date_parts) > 2 else 1
-                return datetime(year, month, day)
-            except (ValueError, TypeError):
-                pass
-    
-    # 5. Пробуем deposited как последний вариант
-    if 'deposited' in crossref_item:
-        date_parts = crossref_item['deposited'].get('date-parts', [[]])[0]
-        if date_parts and len(date_parts) >= 1:
-            try:
-                year = date_parts[0]
-                month = date_parts[1] if len(date_parts) > 1 else 1
-                day = date_parts[2] if len(date_parts) > 2 else 1
-                return datetime(year, month, day)
-            except (ValueError, TypeError):
-                pass
-    
-    return None
 
 # === 9. DOI Prefix Extraction ===
 def normalize_doi(doi):
@@ -2168,7 +2059,7 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
             continue
 
         cr = meta.get('crossref')
-        oa = meta.get('openalex')
+        oa = meta.get('openalex')  # ДОБАВЛЕНО: определяем oa здесь
         
         if cr:
             # Сначала получаем количество ссылок из Crossref
@@ -2234,15 +2125,6 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
                 journal_freq[journal_name] += 1
             if publisher:
                 publisher_freq[publisher] += 1
-
-            publication_date = extract_publication_date_from_crossref(cr)
-            if publication_date:
-                pub_dates.append(publication_date)
-            else:
-                # Fallback на старую логику
-                date_parts = cr.get('published', {}).get('date-parts', [[datetime.now().year]])[0]
-                pub_date = datetime(date_parts[0], date_parts[1] if len(date_parts)>1 else 1, date_parts[2] if len(date_parts)>2 else 1)
-                pub_dates.append(pub_date)
 
         oa = meta.get('openalex')
         if oa:
@@ -4066,17 +3948,24 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
         'if_wos_citations': []  # List of (analyzed_doi, citing_doi, analyzed_date, citing_date) for WoS-corrected Impact Factor
     }
     
+    # Helper function to extract publication date from metadata
     def get_publication_date(metadata):
         """Extract publication date from metadata (Crossref or OpenAlex)"""
         if not metadata:
             return None
             
-        # Try Crossref first using our improved function
+        # Try Crossref first
         cr = metadata.get('crossref')
         if cr:
-            publication_date = extract_publication_date_from_crossref(cr)
-            if publication_date:
-                return publication_date
+            date_parts = cr.get('published', {}).get('date-parts', [[]])[0]
+            if date_parts and len(date_parts) >= 1:
+                try:
+                    year = date_parts[0]
+                    month = date_parts[1] if len(date_parts) > 1 else 1
+                    day = date_parts[2] if len(date_parts) > 2 else 1
+                    return datetime(year, month, day)
+                except:
+                    pass
         
         # Try OpenAlex
         oa = metadata.get('openalex')
@@ -4085,7 +3974,7 @@ def calculate_special_analysis_metrics(analyzed_metadata, citing_metadata, state
                 return datetime.fromisoformat(oa['publication_date'].replace('Z', '+00:00'))
             except:
                 pass
-                    
+                
         return None
     
     # Step 1: Process analyzed articles for CiteScore (B) and Impact Factor (D)
@@ -7306,10 +7195,3 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
-
-
-
-
-
-
-
