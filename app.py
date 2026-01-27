@@ -4266,28 +4266,23 @@ def search_ror_organization_cached(affiliation_name, cache_dict):
 # === NEW FUNCTIONS FOR JOURNAL WEBSITE EXTRACTION ===
 
 def get_journal_website_from_openalex(openalex_source_id):
-    """Получает веб-сайт журнала из OpenAlex API по его source_id"""
     if not openalex_source_id:
         return None
     
     cache_key = f"journal_website_{openalex_source_id}"
     state = get_analysis_state()
     
-    # Проверяем кэш
     if cache_key in state.journal_cache:
         return state.journal_cache[cache_key]
     
     try:
-        # Извлекаем ID из URL формата "https://openalex.org/S2764437742"
         if openalex_source_id.startswith('https://openalex.org/'):
             source_id = openalex_source_id.split('/')[-1].lower()
         else:
             source_id = openalex_source_id.lower()
         
-        # Запрашиваем данные журнала
         url = f"https://api.openalex.org/sources/{source_id}"
         
-        # Используем rate limiter
         rate_limiter.wait_if_needed()
         
         response = requests.get(url, timeout=10)
@@ -4295,15 +4290,12 @@ def get_journal_website_from_openalex(openalex_source_id):
         
         journal_data = response.json()
         
-        # Извлекаем homepage_url
         website = journal_data.get('homepage_url')
         
         if website:
-            # Нормализуем URL
             if not website.startswith(('http://', 'https://')):
                 website = f"https://{website}"
             
-            # Сохраняем в кэш
             state.journal_cache[cache_key] = website
             print(f"✅ Found website for {source_id}: {website}")
             return website
@@ -4318,15 +4310,16 @@ def get_journal_website_from_openalex(openalex_source_id):
         return None
 
 def extract_journal_openalex_id(work_data):
-    """Извлекает OpenAlex source_id из данных работы"""
     if not work_data:
         return None
     
-    # Проверяем host_venue в OpenAlex данных
-    if isinstance(work_data, dict) and 'host_venue' in work_data:
-        host_venue = work_data['host_venue']
-        if host_venue and 'id' in host_venue:
-            return host_venue['id']
+    try:
+        if isinstance(work_data, dict) and 'host_venue' in work_data:
+            host_venue = work_data['host_venue']
+            if host_venue and 'id' in host_venue:
+                return host_venue['id']
+    except (AttributeError, TypeError, KeyError) as e:
+        print(f"⚠️ Error extracting journal OpenAlex ID: {str(e)}")
     
     return None
 
@@ -4352,12 +4345,12 @@ def batch_get_journal_websites(journal_names, analyzed_data, citing_data):
     
     # Добавляем анализируемые работы
     for item in analyzed_data:
-        if item and item.get('openalex'):
+        if item and item.get('openalex'):  # ✅ Проверяем item
             all_works.append(item.get('openalex'))
     
     # Добавляем цитирующие работы
     for item in citing_data:
-        if item and item.get('openalex'):
+        if item and item.get('openalex'):  # ✅ Проверяем item
             all_works.append(item.get('openalex'))
     
     print(f"🔍 Analyzing {len(all_works)} works for journal websites...")
@@ -4366,12 +4359,12 @@ def batch_get_journal_websites(journal_names, analyzed_data, citing_data):
     journal_to_source_ids = {}
     
     for work in all_works:
-        if not work:
+        if not work:  # ✅ Проверяем work на None
             continue
             
         # Получаем название журнала
         journal_name = None
-        if work.get('host_venue'):
+        if work.get('host_venue'):  # ✅ Работает, так как work не None
             journal_name = work['host_venue'].get('display_name')
         elif work.get('primary_location', {}).get('source', {}).get('display_name'):
             journal_name = work['primary_location']['source']['display_name']
@@ -5387,8 +5380,7 @@ def collect_terms_topics_statistics(analyzed_metadata, citing_metadata):
     
 def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, citing_stats, enhanced_stats, citation_timing, overlap_details, fast_metrics, excel_buffer, additional_data):
     """Create enhanced Excel report with error handling for large data"""
-    
-    # ДОБАВИТЬ В НАЧАЛО ФУНКЦИИ:
+
     state = get_analysis_state()
     precomputed_data = precompute_excel_data(
         analyzed_data, citing_data, analyzed_stats, citing_stats, 
@@ -5425,6 +5417,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
             
     try:
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+            
             # Sheet 1: Analyzed articles (with optimization)
             analyzed_list = []
             MAX_ROWS = 50000
@@ -5767,8 +5760,20 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 # Получаем список всех журналов для поиска веб-сайтов
                 journal_names = [journal_info[0] for journal_info in citing_stats['all_journals']]
                 
-                # Получаем веб-сайты журналов (с кэшированием)
-                journal_websites = batch_get_journal_websites(journal_names, analyzed_data, citing_data)
+                # Получаем веб-сайты журналов (с кэшированием) - С ЗАЩИТОЙ ОТ ОШИБОК
+                journal_websites = {}
+                try:
+                    # Проверяем, что данные не None
+                    if analyzed_data is not None and citing_data is not None:
+                        journal_websites = batch_get_journal_websites(journal_names, analyzed_data, citing_data)
+                    else:
+                        print("⚠️ Warning: analyzed_data or citing_data is None, skipping journal website search")
+                        # Создаем пустой словарь
+                        journal_websites = {name: "" for name in journal_names}
+                except Exception as e:
+                    print(f"⚠️ Error in batch_get_journal_websites: {str(e)}")
+                    # Создаем пустой словарь при ошибке
+                    journal_websites = {name: "" for name in journal_names}
                 
                 # Load metrics data if not already loaded
                 if get_analysis_state().if_data is None or get_analysis_state().cs_data is None:
@@ -5801,11 +5806,21 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     issn_1 = journal_issns[0] if len(journal_issns) > 0 else ""
                     issn_2 = journal_issns[1] if len(journal_issns) > 1 else ""
                     
-                    # Get website for this journal
-                    website = journal_websites.get(journal_name, "")
+                    # Get website for this journal - С ЗАЩИТОЙ ОТ ОШИБОК
+                    website = ""
+                    try:
+                        website = journal_websites.get(journal_name, "")
+                    except Exception as e:
+                        print(f"⚠️ Error getting website for {journal_name}: {str(e)}")
+                        website = ""
                     
                     # Get metrics for this journal - UPDATED WITH CS DATA
-                    metrics = get_journal_metrics(journal_issns)
+                    metrics = {}
+                    try:
+                        metrics = get_journal_metrics(journal_issns)
+                    except Exception as e:
+                        print(f"⚠️ Error getting metrics for {journal_name}: {str(e)}")
+                        metrics = {'if_metrics': {}, 'cs_metrics': {}}
                     
                     all_citing_journals_data.append({
                         'Journal': safe_convert(journal_name),
@@ -5815,10 +5830,10 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Articles_Count': safe_convert(count),
                         'Percentage': round(percentage, 2),
                         '': '',  # Empty column
-                        'IF (WoS)': safe_convert(metrics['if_metrics'].get('if', '')) if metrics['if_metrics'] else '',
-                        'Q(WoS)': safe_convert(metrics['if_metrics'].get('quartile', '')) if metrics['if_metrics'] else '',
-                        'SC(Scopus)': safe_convert(metrics['cs_metrics'].get('citescore', '')) if metrics['cs_metrics'] else '',
-                        'Q(Scopus)': safe_convert(metrics['cs_metrics'].get('quartile', '')) if metrics['cs_metrics'] else ''
+                        'IF (WoS)': safe_convert(metrics.get('if_metrics', {}).get('if', '')) if metrics.get('if_metrics') else '',
+                        'Q(WoS)': safe_convert(metrics.get('if_metrics', {}).get('quartile', '')) if metrics.get('if_metrics') else '',
+                        'SC(Scopus)': safe_convert(metrics.get('cs_metrics', {}).get('citescore', '')) if metrics.get('cs_metrics') else '',
+                        'Q(Scopus)': safe_convert(metrics.get('cs_metrics', {}).get('quartile', '')) if metrics.get('cs_metrics') else ''
                     })
                 
                 all_citing_journals_df = pd.DataFrame(all_citing_journals_data)
@@ -7004,4 +7019,5 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
