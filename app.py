@@ -1483,7 +1483,24 @@ def initialize_analysis_state():
         st.session_state.viewed_terms = set()
 
 def get_analysis_state():
+    """Get or initialize analysis state from session state"""
+    if 'analysis_state' not in st.session_state:
+        st.session_state.analysis_state = {
+            'current_page': 0,
+            'total_pages': 0,
+            'is_analyzing': False,
+            'current_issn': None,
+            'current_period': None,
+            'results': None,
+            'error': None
+        }
     return st.session_state.analysis_state
+
+def set_analysis_state(key, value):
+    """Set analysis state value"""
+    state = get_analysis_state()
+    state[key] = value
+    st.session_state.analysis_state = state
 
 # --- Rate Limiter ---
 class RateLimiter:
@@ -7670,6 +7687,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
