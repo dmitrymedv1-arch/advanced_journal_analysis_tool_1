@@ -34,6 +34,9 @@ from collections import defaultdict
 # Import translation manager
 from languages import translation_manager
 
+DATE_MODE_FIRST = "first_date"
+DATE_MODE_ISSUE = "issue_date"
+
 # =============================================================================
 # ENHANCED CACHE MANAGEMENT
 # =============================================================================
@@ -1246,6 +1249,7 @@ class AnalysisState:
         self.ror_cache = {}  # NEW: In-memory cache for ROR data
         self.include_author_id_data = False  # NEW: Flag for Author ID data inclusion
         self.author_id_cache = {}  # NEW: In-memory cache for Author ID data
+        self.date_analysis_mode = DATE_MODE_ISSUE
         
         # Initialize components
         self.config = AnalysisConfig()
@@ -1770,6 +1774,329 @@ def extract_affiliations_and_countries(openalex_data):
     
     return authors_list, list(affiliations), list(countries)
 
+def extract_publication_date_first_mode(crossref_data):
+    """
+    Extract the EARLIEST publication date from Crossref data.
+    Collects all possible dates and returns the earliest one.
+    """
+    if not crossref_data:
+        return None
+    
+    all_dates = []
+    
+    # Collect all possible dates from Crossref
+    date_fields = [
+        ('published-print', 'published-print'),
+        ('published-online', 'published-online'),
+        ('published', 'published'),
+        ('created', 'created'),
+        ('deposited', 'deposited'),
+        ('indexed', 'indexed'),
+        ('accepted', 'accepted')
+    ]
+    
+    for field_name, field_key in date_fields:
+        if crossref_data.get(field_key):
+            date_parts = crossref_data[field_key].get('date-parts')
+            if date_parts and date_parts[0] and len(date_parts[0]) >= 1:
+                # Convert to datetime for comparison
+                year = date_parts[0][0]
+                month = date_parts[0][1] if len(date_parts[0]) > 1 else 1
+                day = date_parts[0][2] if len(date_parts[0]) > 2 else 1
+                
+                try:
+                    date_obj = datetime(year, month, day)
+                    all_dates.append((date_obj, field_name, date_parts[0]))
+                    print(f"📅 FIRST MODE: Found {field_name} date: {date_parts[0]}")
+                except ValueError:
+                    print(f"⚠️ Invalid date in {field_name}: {date_parts[0]}")
+    
+    # Check journal-issue separately
+    if crossref_data.get('journal-issue'):
+        ji = crossref_data['journal-issue']
+        if ji.get('published-online'):
+            date_parts = ji['published-online'].get('date-parts')
+            if date_parts and date_parts[0] and len(date_parts[0]) >= 1:
+                year = date_parts[0][0]
+                month = date_parts[0][1] if len(date_parts[0]) > 1 else 1
+                day = date_parts[0][2] if len(date_parts[0]) > 2 else 1
+                
+                try:
+                    date_obj = datetime(year, month, day)
+                    all_dates.append((date_obj, 'journal-issue-published-online', date_parts[0]))
+                    print(f"📅 FIRST MODE: Found journal-issue-published-online date: {date_parts[0]}")
+                except ValueError:
+                    print(f"⚠️ Invalid date in journal-issue-published-online: {date_parts[0]}")
+    
+    # Also check 'start' field if exists (for conference papers)
+    if crossref_data.get('start'):
+        start_data = crossref_data['start']
+        if isinstance(start_data, dict) and start_data.get('date-parts'):
+            date_parts = start_data['date-parts']
+            if date_parts and date_parts[0] and len(date_parts[0]) >= 1:
+                year = date_parts[0][0]
+                month = date_parts[0][1] if len(date_parts[0]) > 1 else 1
+                day = date_parts[0][2] if len(date_parts[0]) > 2 else 1
+                
+                try:
+                    date_obj = datetime(year, month, day)
+                    all_dates.append((date_obj, 'start', date_parts[0]))
+                    print(f"📅 FIRST MODE: Found start date: {date_parts[0]}")
+                except ValueError:
+                    print(f"⚠️ Invalid start date: {date_parts[0]}")
+    
+    if not all_dates:
+        print("⚠️ FIRST MODE: No dates found in Crossref data")
+        return None
+    
+    # Find the earliest date
+    earliest_date = min(all_dates, key=lambda x: x[0])
+    
+    print(f"✅ FIRST MODE: Selected earliest date: {earliest_date[1]} = {earliest_date[2]}")
+    return earliest_date[2]
+
+def extract_publication_date_issue_mode(crossref_data):
+    """
+    Extract publication date from Crossref data with priority order:
+    1. published-print (для печатных журналов)
+    2. journal-issue -> published-online (дата выпуска электронного журнала)
+    3. published-online (общая дата онлайн публикации)
+    4. published (старое поле)
+    5. created (дата создания записи в Crossref)
+    6. deposited (дата депозита)
+    """
+    if not crossref_data:
+        return None
+    
+    date_parts = None
+    selected_source = None
+    
+    # 1. Приоритет: published-print (печатная версия)
+    if crossref_data.get('published-print'):
+        date_parts = crossref_data['published-print'].get('date-parts')
+        if date_parts and date_parts[0]:
+            selected_source = 'published-print'
+            print(f"📅 ISSUE MODE: Using published-print date: {date_parts[0]}")
+            return date_parts[0]
+    
+    # 2. Приоритет: journal-issue -> published-online (дата выпуска электронного журнала)
+    if crossref_data.get('journal-issue'):
+        journal_issue = crossref_data['journal-issue']
+        if journal_issue.get('published-online'):
+            date_parts = journal_issue['published-online'].get('date-parts')
+            if date_parts and date_parts[0]:
+                selected_source = 'journal-issue-published-online'
+                print(f"📅 ISSUE MODE: Using journal-issue published-online date: {date_parts[0]}")
+                return date_parts[0]
+    
+    # 3. Приоритет: published-online (общая онлайн публикация)
+    if crossref_data.get('published-online'):
+        date_parts = crossref_data['published-online'].get('date-parts')
+        if date_parts and date_parts[0]:
+            selected_source = 'published-online'
+            print(f"📅 ISSUE MODE: Using published-online date: {date_parts[0]}")
+            return date_parts[0]
+    
+    # 4. Резервный вариант: published (старое поле)
+    if crossref_data.get('published'):
+        date_parts = crossref_data['published'].get('date-parts')
+        if date_parts and date_parts[0]:
+            selected_source = 'published'
+            print(f"📅 ISSUE MODE: Using published date: {date_parts[0]}")
+            return date_parts[0]
+    
+    # 5. Последний вариант: created (дата создания записи)
+    if crossref_data.get('created'):
+        date_parts = crossref_data['created'].get('date-parts')
+        if date_parts and date_parts[0]:
+            selected_source = 'created'
+            print(f"📅 ISSUE MODE: Using created date (fallback): {date_parts[0]}")
+            return date_parts[0]
+    
+    # 6. Крайний случай: deposited
+    if crossref_data.get('deposited'):
+        date_parts = crossref_data['deposited'].get('date-parts')
+        if date_parts and date_parts[0]:
+            selected_source = 'deposited'
+            print(f"📅 ISSUE MODE: Using deposited date (fallback): {date_parts[0]}")
+            return date_parts[0]
+    
+    print(f"⚠️ ISSUE MODE: No publication date found in Crossref data")
+    return None
+
+def get_publication_date_from_crossref(crossref_data, date_mode):
+    """
+    Unified method to get publication date based on selected mode.
+    
+    Args:
+        crossref_data: Crossref metadata dictionary
+        date_mode: Either DATE_MODE_FIRST or DATE_MODE_ISSUE
+    
+    Returns:
+        List of date parts [year, month, day] or None
+    """
+    if not crossref_data:
+        return None
+    
+    if date_mode == DATE_MODE_FIRST:
+        return extract_publication_date_first_mode(crossref_data)
+    elif date_mode == DATE_MODE_ISSUE:
+        return extract_publication_date_issue_mode(crossref_data)
+    else:
+        # Default to issue mode
+        print(f"⚠️ Unknown date mode '{date_mode}', using ISSUE mode")
+        return extract_publication_date_issue_mode(crossref_data)
+
+def get_publication_year_from_metadata(metadata, date_mode=None):
+    """
+    Get publication year from metadata using the selected date mode.
+    Works with both Crossref and OpenAlex data.
+    
+    Args:
+        metadata: Article metadata dictionary
+        date_mode: Date analysis mode (optional, will use state if not provided)
+    
+    Returns:
+        Integer year or None
+    """
+    if not metadata:
+        return None
+    
+    # Get date mode from state if not provided
+    if date_mode is None:
+        state = get_analysis_state()
+        date_mode = state.date_analysis_mode
+    
+    # Try Crossref first
+    cr_data = metadata.get('crossref')
+    if cr_data:
+        date_parts = get_publication_date_from_crossref(cr_data, date_mode)
+        if date_parts and len(date_parts) >= 1:
+            return date_parts[0]
+    
+    # Try OpenAlex
+    oa_data = metadata.get('openalex')
+    if oa_data:
+        pub_date = oa_data.get('publication_date')
+        if pub_date:
+            try:
+                # Parse date from OpenAlex (format: "2023-12-31")
+                return int(pub_date[:4])
+            except (ValueError, TypeError):
+                pass
+        
+        # Alternative source in OpenAlex
+        pub_year = oa_data.get('publication_year')
+        if pub_year:
+            try:
+                return int(pub_year)
+            except (ValueError, TypeError):
+                pass
+    
+    return None
+
+def get_publication_date_object(metadata, date_mode=None):
+    """
+    Get publication date as datetime object using the selected date mode.
+    
+    Args:
+        metadata: Article metadata dictionary
+        date_mode: Date analysis mode (optional, will use state if not provided)
+    
+    Returns:
+        datetime object or None
+    """
+    if not metadata:
+        return None
+    
+    # Get date mode from state if not provided
+    if date_mode is None:
+        state = get_analysis_state()
+        date_mode = state.date_analysis_mode
+    
+    # Try Crossref first
+    cr_data = metadata.get('crossref')
+    if cr_data:
+        date_parts = get_publication_date_from_crossref(cr_data, date_mode)
+        if date_parts and len(date_parts) >= 1:
+            try:
+                year = date_parts[0]
+                month = date_parts[1] if len(date_parts) > 1 else 1
+                day = date_parts[2] if len(date_parts) > 2 else 1
+                return datetime(year, month, day)
+            except (ValueError, TypeError) as e:
+                print(f"⚠️ Error creating datetime from {date_parts}: {e}")
+    
+    # Try OpenAlex
+    oa_data = metadata.get('openalex')
+    if oa_data and oa_data.get('publication_date'):
+        try:
+            return datetime.fromisoformat(oa_data['publication_date'].replace('Z', '+00:00'))
+        except (ValueError, TypeError):
+            pass
+    
+    return None
+
+def debug_date_extraction_for_sample(articles, sample_size=5):
+    """
+    Debug function to show how dates are extracted in both modes.
+    Helps understand why articles might be filtered differently.
+    """
+    if not articles:
+        print("⚠️ No articles to debug")
+        return
+    
+    print(f"\n🔍 СРАВНЕНИЕ РЕЖИМОВ ИЗВЛЕЧЕНИЯ ДАТ (первые {sample_size} статей):")
+    print("=" * 100)
+    
+    for i, article in enumerate(articles[:sample_size]):
+        if not article or not article.get('crossref'):
+            continue
+            
+        cr = article['crossref']
+        doi = cr.get('DOI', f'Статья {i+1}')
+        
+        print(f"\n📄 {doi}:")
+        
+        # Extract dates in both modes
+        first_date = extract_publication_date_first_mode(cr)
+        issue_date = extract_publication_date_issue_mode(cr)
+        
+        print(f"   Режим 'Первая дата': {first_date}")
+        print(f"   Режим 'Дата выпуска': {issue_date}")
+        
+        # Show all available dates
+        print(f"   Все доступные даты в Crossref:")
+        
+        # Check all date fields
+        date_fields = [
+            ('published-print', 'published-print'),
+            ('journal-issue-published-online', 'journal-issue', 'published-online'),
+            ('published-online', 'published-online'),
+            ('published', 'published'),
+            ('created', 'created'),
+            ('deposited', 'deposited'),
+            ('indexed', 'indexed'),
+            ('accepted', 'accepted'),
+            ('start', 'start')
+        ]
+        
+        for field_name, *field_path in date_fields:
+            value = cr
+            for key in field_path:
+                if isinstance(value, dict):
+                    value = value.get(key)
+                else:
+                    value = None
+                    break
+            
+            if value and isinstance(value, dict) and value.get('date-parts'):
+                date_parts = value['date-parts']
+                if date_parts and date_parts[0]:
+                    print(f"     • {field_name}: {date_parts[0]}")
+    
+    print("=" * 100)
+
 # === 7. Journal Information Extraction ===
 def extract_journal_info(metadata):
     journal_info = {
@@ -1809,8 +2136,20 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
     base_url = "https://api.crossref.org/works"
     items = []
     cursor = "*"
+    
+    # Get date mode from state
+    state = get_analysis_state()
+    date_mode = state.date_analysis_mode
+    
+    # Prepare filter parameters
+    filter_parts = [
+        f'issn:{issn}',
+        f'from-pub-date:{from_date}',
+        f'until-pub-date:{until_date}'
+    ]
+    
     params = {
-        'filter': f'issn:{issn},from-pub-date:{from_date},until-pub-date:{until_date}',
+        'filter': ','.join(filter_parts),
         'rows': 1000,
         'cursor': cursor,
         'mailto': EMAIL
@@ -1821,43 +2160,104 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
     progress_container = st.container()
     
     with progress_container:
-        st.info("📥 " + translation_manager.get_text('loading_articles') + " **Crossref** " + translation_manager.get_text('and') + " **OpenAlex**. " + translation_manager.get_text('analysis_may_take_time') + " " + translation_manager.get_text('reduce_period_recommended'))
+        st.info(f"📥 {translation_manager.get_text('loading_articles')} **Crossref** {translation_manager.get_text('and')} **OpenAlex**. "
+                f"{translation_manager.get_text('analysis_may_take_time')} {translation_manager.get_text('reduce_period_recommended')}")
+        st.info(f"🔍 Поиск статей с датами в диапазоне: {from_date} - {until_date}")
+        st.info(f"📅 Режим анализа дат: {'Первая доступная дата' if date_mode == DATE_MODE_FIRST else 'Дата выпуска'}")
+    
+    total_items = 0
+    page = 0
+    from_year = int(from_date.split('-')[0])
+    until_year = int(until_date.split('-')[0])
     
     while cursor:
+        page += 1
         params['cursor'] = cursor
+        
         success = False
-        for _ in range(RETRIES):
+        for attempt in range(RETRIES):
             try:
                 rate_limiter.wait_if_needed()
                 resp = requests.get(base_url, params=params, timeout=15)
+                
                 if resp.status_code == 200:
                     data = resp.json()
-                    new_items = data['message']['items']
-                    items.extend(new_items)
+                    new_items = data['message'].get('items', [])
+                    
+                    # Filter articles based on publication date using selected mode
+                    filtered_items = []
+                    for item in new_items:
+                        if not item:
+                            continue
+                            
+                        # Extract publication date using selected mode
+                        date_parts = get_publication_date_from_crossref(item, date_mode)
+                        
+                        if date_parts and len(date_parts) >= 1:
+                            year = date_parts[0]
+                            
+                            # Check if year is within range
+                            if from_year <= year <= until_year:
+                                filtered_items.append(item)
+                                if total_items < 5:  # Debug for first few items
+                                    print(f"✅ Статья {item.get('DOI', 'N/A')} добавлена (режим {date_mode}): год {year}")
+                            else:
+                                if total_items < 5:  # Debug for first few items
+                                    print(f"❌ Статья {item.get('DOI', 'N/A')} отфильтрована (режим {date_mode}): год {year} вне диапазона")
+                        else:
+                            # If date not found, still include for analysis
+                            filtered_items.append(item)
+                            if total_items < 5:  # Debug for first few items
+                                print(f"⚠️ Статья {item.get('DOI', 'N/A')} добавлена без даты (режим {date_mode})")
+                    
+                    items.extend(filtered_items)
+                    total_items += len(filtered_items)
+                    
                     cursor = data['message'].get('next-cursor')
                     
-                    status_text.text(f"📥 {translation_manager.get_text('loaded_articles').format(count=len(items))}")
-                    if cursor:
-                        progress = min(len(items) / (len(items) + 100), 0.95)
+                    status_text.text(f"📥 {translation_manager.get_text('loaded_articles').format(count=total_items)} (страница {page})")
+                    
+                    if cursor and total_items > 0:
+                        progress = min(total_items / (total_items + 500), 0.95)
                         progress_bar.progress(progress)
+                    
+                    # Log page information
+                    print(f"📄 Страница {page}: найдено {len(new_items)} статей, после фильтрации {len(filtered_items)}, всего {total_items}")
                     
                     delayer.wait(success=True)
                     success = True
                     break
+                    
+                elif resp.status_code == 404:
+                    print(f"⚠️ Страница {page}: 404 Not Found")
+                    break
+                    
+                else:
+                    print(f"⚠️ Страница {page}: статус {resp.status_code}")
+                    
             except Exception as e:
-                st.error(translation_manager.get_text('loading_error').format(error=e))
+                print(f"❌ Ошибка на странице {page}, попытка {attempt+1}/{RETRIES}: {e}")
+                if attempt < RETRIES - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+            
             delayer.wait(success=False)
+        
         if not success:
+            print(f"🚫 Не удалось загрузить страницу {page} после {RETRIES} попыток")
             break
+        
         if not new_items:
+            print(f"ℹ️ Страница {page}: нет новых статей, завершение")
             break
     
     progress_bar.progress(1.0)
-    status_text.text(f"✅ {translation_manager.get_text('articles_loaded').format(count=len(items))}")
+    status_text.text(f"✅ {translation_manager.get_text('articles_loaded').format(count=total_items)}")
     time.sleep(0.5)
     progress_bar.empty()
     status_text.empty()
     progress_container.empty()
+    
+    print(f"🎯 Итого загружено {total_items} статей для ISSN {issn} за период {from_date}-{until_date} (режим дат: {date_mode})")
     
     return items
 
@@ -2113,9 +2513,31 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
                     name = family or 'Unknown'
                 author_freq[name] += 1
 
-            date_parts = cr.get('published', {}).get('date-parts', [[datetime.now().year]])[0]
-            pub_date = datetime(date_parts[0], date_parts[1] if len(date_parts)>1 else 1, date_parts[2] if len(date_parts)>2 else 1)
-            pub_dates.append(pub_date)
+            state = get_analysis_state()
+            date_mode = state.date_analysis_mode
+            
+            # Extract publication date using selected mode
+            date_parts = get_publication_date_from_crossref(cr, date_mode)
+            if date_parts and len(date_parts) >= 1:
+                year = date_parts[0]
+                month = date_parts[1] if len(date_parts) > 1 else 1
+                day = date_parts[2] if len(date_parts) > 2 else 1
+                
+                # Validate and create date object
+                try:
+                    pub_date = datetime(year, month, day)
+                    pub_dates.append(pub_date)
+                except ValueError as e:
+                    print(f"⚠️ Некорректная дата в статье (режим {date_mode}): {year}-{month}-{day}: {e}")
+                    # Use only year if date is invalid
+                    try:
+                        pub_date = datetime(year, 1, 1)
+                        pub_dates.append(pub_date)
+                    except:
+                        pass
+            else:
+                # If no date found, use current year as fallback
+                pub_dates.append(datetime(datetime.now().year, 1, 1))
 
             journal_name = cr.get('container-title', [''])[0] if cr.get('container-title') else ''
             if journal_name:
@@ -2247,7 +2669,12 @@ def enhanced_stats_calculation(analyzed_metadata, citing_metadata, state):
         if analyzed and analyzed.get('crossref'):
             analyzed_doi = analyzed['crossref'].get('DOI')
             if analyzed_doi:
-                analyzed_year = analyzed['crossref'].get('published', {}).get('date-parts', [[0]])[0][0]
+                state = get_analysis_state()
+                date_mode = state.date_analysis_mode
+                
+                # Extract publication year using selected mode
+                date_parts = get_publication_date_from_crossref(analyzed['crossref'], date_mode)
+                analyzed_year = date_parts[0] if date_parts and len(date_parts) > 0 else 0
                 citings = get_citing_dois_and_metadata((analyzed_doi, state))
                 citation_counts.append(len(citings))
                 
@@ -2321,8 +2748,12 @@ def calculate_citation_timing_stats(analyzed_metadata, state):
             analyzed_doi = analyzed['crossref'].get('DOI')
             if not analyzed_doi:
                 continue
-                
-            analyzed_date_parts = analyzed['crossref'].get('published', {}).get('date-parts', [[]])[0]
+
+            state = get_analysis_state()
+            date_mode = state.date_analysis_mode
+            
+            # Extract publication date using selected mode
+            analyzed_date_parts = get_publication_date_from_crossref(analyzed['crossref'], date_mode)
             if not analyzed_date_parts or len(analyzed_date_parts) < 1:
                 continue
                 
@@ -5267,6 +5698,10 @@ def precompute_excel_data(analyzed_data, citing_data, analyzed_stats, citing_sta
     
     print("🔍 Precomputing data for Excel generation...")
     
+    # Get date mode
+    date_mode = state.date_analysis_mode
+    print(f"📅 Используется режим дат: {date_mode}")
+    
     # Предварительно извлекаем все данные и кэшируем
     analyzed_precomputed = []
     for item in analyzed_data:
@@ -6647,6 +7082,8 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     
     state = get_analysis_state()
     state.analysis_complete = False
+
+    st.info(f"📅 **Режим анализа дат:** {'Первая доступная дата' if date_mode == DATE_MODE_FIRST else 'Дата выпуска журнала'}")
     
     # Функция для обновления счетчика общего времени
     def update_timer():
@@ -6712,6 +7149,8 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     if not items:
         st.error(translation_manager.get_text('no_articles_found'))
         return
+
+    debug_date_extraction_for_sample(items, sample_size=3)
 
     n_analyzed = len(items)
     st.success(translation_manager.get_text('articles_found').format(count=n_analyzed))
@@ -7001,6 +7440,43 @@ def main_optimized():
         )
         
         st.markdown("---")
+        st.header("📅 Настройка анализа дат")
+        
+        # Взаимоисключающие чекбоксы для режимов анализа дат
+        col_date1, col_date2 = st.columns(2)
+        
+        with col_date1:
+            first_date_mode = st.checkbox(
+                "Первая доступная дата", 
+                value=state.date_analysis_mode == DATE_MODE_FIRST,
+                help="Использовать самую раннюю дату из всех доступных в Crossref (created, start, published-online и др.)"
+            )
+            
+        with col_date2:
+            issue_date_mode = st.checkbox(
+                "Дата выпуска журнала", 
+                value=state.date_analysis_mode == DATE_MODE_ISSUE,
+                help="Использовать дату публикации выпуска (published-print → journal-issue → published-online → published)"
+            )
+        
+        # Обработка взаимоисключения чекбоксов
+        if first_date_mode and state.date_analysis_mode != DATE_MODE_FIRST:
+            state.date_analysis_mode = DATE_MODE_FIRST
+            issue_date_mode = False
+            st.rerun()  # Обновляем интерфейс
+            
+        if issue_date_mode and state.date_analysis_mode != DATE_MODE_ISSUE:
+            state.date_analysis_mode = DATE_MODE_ISSUE
+            first_date_mode = False
+            st.rerun()  # Обновляем интерфейс
+        
+        # Отображаем информацию о выбранном режиме
+        mode_info = {
+            DATE_MODE_FIRST: "✅ **Первая доступная дата**: будет использована самая ранняя дата из всех доступных в Crossref (created, start, published-online и др.)",
+            DATE_MODE_ISSUE: "✅ **Дата выпуска журнала**: будет использована дата публикации выпуска (published-print → journal-issue → published-online → published)"
+        }
+        
+        st.info(mode_info[state.date_analysis_mode])
         
         # Include ROR data checkbox
         include_ror_data = st.checkbox(
@@ -7195,3 +7671,4 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
