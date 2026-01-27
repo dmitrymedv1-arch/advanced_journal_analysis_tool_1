@@ -4266,23 +4266,30 @@ def search_ror_organization_cached(affiliation_name, cache_dict):
 # === NEW FUNCTIONS FOR JOURNAL WEBSITE EXTRACTION ===
 
 def get_journal_website_from_openalex(openalex_source_id):
+    """Получает веб-сайт журнала из OpenAlex API по его source_id"""
     if not openalex_source_id:
         return None
     
     cache_key = f"journal_website_{openalex_source_id}"
     state = get_analysis_state()
     
+    # Проверяем кэш
     if cache_key in state.journal_cache:
         return state.journal_cache[cache_key]
     
     try:
+        # ИЗМЕНЕНИЕ: Сохраняем регистр source_id
         if openalex_source_id.startswith('https://openalex.org/'):
-            source_id = openalex_source_id.split('/')[-1].lower()
+            source_id = openalex_source_id.split('/')[-1]  # Убираем преобразование в lower()
         else:
-            source_id = openalex_source_id.lower()
+            source_id = openalex_source_id  # Сохраняем как есть
         
+        # Запрашиваем данные журнала
         url = f"https://api.openalex.org/sources/{source_id}"
         
+        print(f"🔍 Fetching journal website from: {url}")
+        
+        # Используем rate limiter
         rate_limiter.wait_if_needed()
         
         response = requests.get(url, timeout=10)
@@ -4290,12 +4297,15 @@ def get_journal_website_from_openalex(openalex_source_id):
         
         journal_data = response.json()
         
+        # Извлекаем homepage_url
         website = journal_data.get('homepage_url')
         
         if website:
+            # Нормализуем URL
             if not website.startswith(('http://', 'https://')):
                 website = f"https://{website}"
             
+            # Сохраняем в кэш
             state.journal_cache[cache_key] = website
             print(f"✅ Found website for {source_id}: {website}")
             return website
@@ -4309,15 +4319,76 @@ def get_journal_website_from_openalex(openalex_source_id):
         state.journal_cache[cache_key] = None
         return None
 
+def get_journal_website_from_openalex_direct(doi):
+    """Прямое получение веб-сайта журнала по DOI статьи"""
+    if not doi:
+        return None
+    
+    cache_key = f"journal_website_via_doi_{doi}"
+    state = get_analysis_state()
+    
+    # Проверяем кэш
+    if cache_key in state.journal_cache:
+        return state.journal_cache[cache_key]
+    
+    try:
+        # Получаем данные статьи
+        url = f"https://api.openalex.org/works/https://doi.org/{doi}"
+        
+        rate_limiter.wait_if_needed()
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            work_data = response.json()
+            
+            # Извлекаем source_id
+            source_id = extract_journal_openalex_id(work_data)
+            if source_id:
+                website = get_journal_website_from_openalex(source_id)
+                state.journal_cache[cache_key] = website
+                return website
+    
+    except Exception as e:
+        print(f"⚠️ Error getting journal website via DOI {doi}: {str(e)}")
+    
+    return None
+
 def extract_journal_openalex_id(work_data):
+    """Извлекает OpenAlex source_id из данных работы"""
     if not work_data:
         return None
     
     try:
-        if isinstance(work_data, dict) and 'host_venue' in work_data:
-            host_venue = work_data['host_venue']
-            if host_venue and 'id' in host_venue:
-                return host_venue['id']
+        # Метод 1: Проверяем host_venue в OpenAlex данных
+        if isinstance(work_data, dict):
+            # Сначала проверяем host_venue
+            if 'host_venue' in work_data and work_data['host_venue']:
+                host_venue = work_data['host_venue']
+                if isinstance(host_venue, dict) and 'id' in host_venue:
+                    source_id = host_venue['id']
+                    if source_id and source_id.startswith('https://openalex.org/'):
+                        return source_id
+            
+            # Метод 2: Проверяем primary_location
+            if 'primary_location' in work_data and work_data['primary_location']:
+                primary_location = work_data['primary_location']
+                if isinstance(primary_location, dict) and 'source' in primary_location:
+                    source = primary_location['source']
+                    if isinstance(source, dict) and 'id' in source:
+                        source_id = source['id']
+                        if source_id and source_id.startswith('https://openalex.org/'):
+                            return source_id
+            
+            # Метод 3: Проверяем альтернативные поля
+            if 'locations' in work_data and work_data['locations']:
+                for location in work_data['locations']:
+                    if isinstance(location, dict) and 'source' in location:
+                        source = location['source']
+                        if isinstance(source, dict) and 'id' in source:
+                            source_id = source['id']
+                            if source_id and source_id.startswith('https://openalex.org/'):
+                                return source_id
+    
     except (AttributeError, TypeError, KeyError) as e:
         print(f"⚠️ Error extracting journal OpenAlex ID: {str(e)}")
     
@@ -4340,68 +4411,119 @@ def batch_get_journal_websites(journal_names, analyzed_data, citing_data):
     """Пакетное получение веб-сайтов журналов из всех доступных данных"""
     websites_cache = {}
     
+    if not analyzed_data or not citing_data:
+        print("⚠️ No data provided for journal website search")
+        return websites_cache
+    
     # Собираем все работы для анализа
     all_works = []
     
     # Добавляем анализируемые работы
     for item in analyzed_data:
-        if item and item.get('openalex'):  # ✅ Проверяем item
+        if item and item.get('openalex'):
             all_works.append(item.get('openalex'))
     
     # Добавляем цитирующие работы
     for item in citing_data:
-        if item and item.get('openalex'):  # ✅ Проверяем item
+        if item and item.get('openalex'):
             all_works.append(item.get('openalex'))
     
     print(f"🔍 Analyzing {len(all_works)} works for journal websites...")
     
     # Создаем словарь журнал -> список source_ids
     journal_to_source_ids = {}
+    journal_name_mapping = {}  # Для сопоставления названий журналов
     
     for work in all_works:
-        if not work:  # ✅ Проверяем work на None
+        if not work:
             continue
             
-        # Получаем название журнала
-        journal_name = None
-        if work.get('host_venue'):  # ✅ Работает, так как work не None
-            journal_name = work['host_venue'].get('display_name')
-        elif work.get('primary_location', {}).get('source', {}).get('display_name'):
-            journal_name = work['primary_location']['source']['display_name']
-        
-        if not journal_name:
+        try:
+            # Получаем название журнала
+            journal_name = None
+            source_id = None
+            
+            # Метод 1: Из host_venue
+            if work.get('host_venue'):
+                journal_name = work['host_venue'].get('display_name')
+                source_id = work['host_venue'].get('id')
+            
+            # Метод 2: Из primary_location
+            if not journal_name and work.get('primary_location', {}).get('source'):
+                journal_name = work['primary_location']['source'].get('display_name')
+                source_id = work['primary_location']['source'].get('id')
+            
+            if not journal_name or not source_id:
+                continue
+            
+            # Нормализуем название журнала (убираем лишние пробелы)
+            journal_name = journal_name.strip()
+            
+            # Сохраняем mapping для разных вариантов написания
+            journal_name_lower = journal_name.lower()
+            if journal_name_lower not in journal_name_mapping:
+                journal_name_mapping[journal_name_lower] = journal_name
+            
+            # Используем нормализованное название
+            normalized_journal_name = journal_name_mapping[journal_name_lower]
+            
+            if normalized_journal_name not in journal_to_source_ids:
+                journal_to_source_ids[normalized_journal_name] = set()
+            
+            journal_to_source_ids[normalized_journal_name].add(source_id)
+            
+        except Exception as e:
+            print(f"⚠️ Error processing work for journal website: {str(e)}")
             continue
-        
-        # Получаем source_id
-        source_id = extract_journal_openalex_id(work)
-        if not source_id:
-            continue
-        
-        if journal_name not in journal_to_source_ids:
-            journal_to_source_ids[journal_name] = set()
-        
-        journal_to_source_ids[journal_name].add(source_id)
+    
+    print(f"📊 Found {len(journal_to_source_ids)} unique journals with source IDs")
     
     # Для каждого журнала в списке ищем веб-сайт
+    processed_count = 0
+    found_count = 0
+    
     for journal_name in journal_names:
-        if not journal_name or journal_name in websites_cache:
+        if not journal_name:
+            continue
+            
+        journal_name_clean = journal_name.strip()
+        
+        # Проверяем кэш
+        if journal_name_clean in websites_cache:
             continue
         
         website = None
         
         # Пробуем найти через source_ids, которые у нас есть
-        if journal_name in journal_to_source_ids:
-            for source_id in journal_to_source_ids[journal_name]:
+        # Ищем с учетом разных вариантов написания
+        found_journal_key = None
+        
+        # Сначала точное совпадение
+        if journal_name_clean in journal_to_source_ids:
+            found_journal_key = journal_name_clean
+        else:
+            # Пробуем найти по lowercase
+            journal_name_lower = journal_name_clean.lower()
+            for key in journal_to_source_ids.keys():
+                if key.lower() == journal_name_lower:
+                    found_journal_key = key
+                    break
+        
+        if found_journal_key and found_journal_key in journal_to_source_ids:
+            for source_id in journal_to_source_ids[found_journal_key]:
                 website = get_journal_website_from_openalex(source_id)
                 if website:
+                    found_count += 1
                     break
         
         # Если не нашли, пробуем поискать в API по названию
         if not website:
             try:
                 # Эвристический поиск по названию
-                search_name = journal_name.replace(' ', '%20')
+                search_name = journal_name_clean.replace(' ', '%20')
                 url = f"https://api.openalex.org/sources?search={search_name}&per-page=1"
+                
+                print(f"🔍 Searching API for journal: {journal_name_clean}")
                 
                 rate_limiter.wait_if_needed()
                 response = requests.get(url, timeout=10)
@@ -4410,15 +4532,32 @@ def batch_get_journal_websites(journal_names, analyzed_data, citing_data):
                     data = response.json()
                     if data.get('results') and len(data['results']) > 0:
                         result = data['results'][0]
-                        if result.get('display_name', '').lower() == journal_name.lower():
-                            website = result.get('homepage_url')
-                            if website and not website.startswith(('http://', 'https://')):
-                                website = f"https://{website}"
+                        api_journal_name = result.get('display_name', '')
+                        
+                        # Проверяем схожесть названий
+                        if api_journal_name:
+                            # Простая проверка: содержит ли результат наш запрос или наоборот
+                            if (journal_name_lower in api_journal_name.lower() or 
+                                api_journal_name.lower() in journal_name_lower):
+                                
+                                website = result.get('homepage_url')
+                                if website and not website.startswith(('http://', 'https://')):
+                                    website = f"https://{website}"
+                                
+                                if website:
+                                    print(f"✅ Found via API search: {website}")
+                                    found_count += 1
             except Exception as e:
-                print(f"⚠️ Error searching for journal {journal_name}: {str(e)}")
+                print(f"⚠️ Error searching API for journal {journal_name_clean}: {str(e)}")
         
-        websites_cache[journal_name] = website or ""
+        websites_cache[journal_name_clean] = website or ""
+        processed_count += 1
+        
+        # Логируем прогресс
+        if processed_count % 10 == 0:
+            print(f"📊 Processed {processed_count}/{len(journal_names)} journals, found {found_count} websites")
     
+    print(f"✅ Journal website search completed: {found_count}/{len(journal_names)} found")
     return websites_cache
 
 # === NEW FUNCTION: PARALLEL ROR PROCESSING WITH PROGRESS BAR ===
@@ -5760,26 +5899,29 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 # Получаем список всех журналов для поиска веб-сайтов
                 journal_names = [journal_info[0] for journal_info in citing_stats['all_journals']]
                 
-                # Получаем веб-сайты журналов (с кэшированием) - С ЗАЩИТОЙ ОТ ОШИБОК
+                print(f"🔍 Starting journal website search for {len(journal_names)} journals")
+                print(f"   Sample journal names: {journal_names[:5]}")
+                
+                # Получаем веб-сайты журналов
                 journal_websites = {}
                 try:
-                    # Проверяем, что данные не None
                     if analyzed_data is not None and citing_data is not None:
                         journal_websites = batch_get_journal_websites(journal_names, analyzed_data, citing_data)
+                        print(f"✅ Found websites for {sum(1 for w in journal_websites.values() if w)}/{len(journal_websites)} journals")
                     else:
                         print("⚠️ Warning: analyzed_data or citing_data is None, skipping journal website search")
-                        # Создаем пустой словарь
-                        journal_websites = {name: "" for name in journal_names}
+                        journal_websites = {}
                 except Exception as e:
                     print(f"⚠️ Error in batch_get_journal_websites: {str(e)}")
-                    # Создаем пустой словарь при ошибке
-                    journal_websites = {name: "" for name in journal_names}
+                    import traceback
+                    traceback.print_exc()
+                    journal_websites = {}
                 
                 # Load metrics data if not already loaded
                 if get_analysis_state().if_data is None or get_analysis_state().cs_data is None:
                     load_metrics_data()
                 
-                for journal_info in citing_stats['all_journals']:
+                for idx, journal_info in enumerate(citing_stats['all_journals']):
                     journal_name = journal_info[0]
                     count = journal_info[1]
                     percentage = (safe_convert(count) / total_citing_articles * 100) if total_citing_articles > 0 else 0
@@ -5806,15 +5948,29 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     issn_1 = journal_issns[0] if len(journal_issns) > 0 else ""
                     issn_2 = journal_issns[1] if len(journal_issns) > 1 else ""
                     
-                    # Get website for this journal - С ЗАЩИТОЙ ОТ ОШИБОК
+                    # Get website for this journal
                     website = ""
                     try:
                         website = journal_websites.get(journal_name, "")
+                        # Если не нашли по точному совпадению, пробуем найти по похожим названиям
+                        if not website:
+                            # Ищем похожие названия (case-insensitive)
+                            journal_name_lower = journal_name.lower()
+                            for key, value in journal_websites.items():
+                                if key.lower() == journal_name_lower:
+                                    website = value
+                                    break
+                                # Проверяем частичное совпадение
+                                elif (journal_name_lower in key.lower() or 
+                                      key.lower() in journal_name_lower):
+                                    if value:  # Берем только если есть website
+                                        website = value
+                                        break
                     except Exception as e:
                         print(f"⚠️ Error getting website for {journal_name}: {str(e)}")
                         website = ""
                     
-                    # Get metrics for this journal - UPDATED WITH CS DATA
+                    # Get metrics for this journal
                     metrics = {}
                     try:
                         metrics = get_journal_metrics(journal_issns)
@@ -5835,6 +5991,10 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'SC(Scopus)': safe_convert(metrics.get('cs_metrics', {}).get('citescore', '')) if metrics.get('cs_metrics') else '',
                         'Q(Scopus)': safe_convert(metrics.get('cs_metrics', {}).get('quartile', '')) if metrics.get('cs_metrics') else ''
                     })
+                    
+                    # Логируем для отладки первых 10 записей
+                    if idx < 10 and website:
+                        print(f"   [{idx}] {journal_name}: {website}")
                 
                 all_citing_journals_df = pd.DataFrame(all_citing_journals_data)
                 all_citing_journals_df.to_excel(writer, sheet_name='All_Journals_Citing', index=False)
@@ -7019,5 +7179,6 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
