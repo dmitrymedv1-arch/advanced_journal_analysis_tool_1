@@ -486,6 +486,9 @@ def process_data_in_chunks(data, chunk_size=500, process_func=None):
     
     return results
 
+DATE_MODE_EARLIEST = "earliest"  # Use earliest available date
+DATE_MODE_ISSUE = "issue"        # Use issue-related date (journal publication logic)
+            
 # =============================================================================
 # CONFIGURATION AND SETTINGS (ORIGINAL)
 # =============================================================================
@@ -999,18 +1002,18 @@ class DataProcessor:
                 metadata.citation_count = oa_citations
         
         return metadata
-    
+
     def _extract_publication_date(self, crossref_data: Dict) -> Optional[datetime]:
-        """Extract publication date from Crossref data"""
-        date_parts = crossref_data.get('published', {}).get('date-parts', [[]])[0]
+        """Extract publication date from Crossref data using selected mode"""
+        date_parts = get_publication_date_from_crossref(crossref_data)
         if date_parts and len(date_parts) >= 1:
             try:
                 year = date_parts[0]
                 month = date_parts[1] if len(date_parts) > 1 else 1
                 day = date_parts[2] if len(date_parts) > 2 else 1
                 return datetime(year, month, day)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                self.logger.warning(f"Error parsing publication date: {str(e)}")
         return None
     
     def _extract_crossref_authors(self, crossref_data: Dict) -> List[str]:
@@ -1628,6 +1631,346 @@ def get_journal_name(issn):
         delayer.wait(success=False)
     return translation_manager.get_text('journal_not_found')
 
+def get_date_mode():
+    """Get current date extraction mode from session state"""
+    return st.session_state.get('date_extraction_mode', DATE_MODE_ISSUE)
+
+def set_date_mode(mode):
+    """Set date extraction mode in session state"""
+    st.session_state.date_extraction_mode = mode
+
+def extract_earliest_date_from_crossref(crossref_data):
+    """
+    Extract the EARLIEST available date from Crossref data.
+    Priority: created -> deposited -> published-online -> published-print -> published
+    Returns date-parts list or None if no date found.
+    """
+    if not crossref_data:
+        return None
+    
+    # Track all available dates with their timestamps
+    available_dates = []
+    
+    # Helper function to add date if present
+    def add_date(field_name, date_obj):
+        if date_obj and date_obj.get('date-parts'):
+            date_parts = date_obj['date-parts'][0]
+            if date_parts and len(date_parts) > 0:
+                # Convert to datetime for comparison
+                try:
+                    year = int(date_parts[0])
+                    month = int(date_parts[1]) if len(date_parts) > 1 else 1
+                    day = int(date_parts[2]) if len(date_parts) > 2 else 1
+                    dt = datetime(year, month, day)
+                    available_dates.append((dt, date_parts, field_name))
+                except (ValueError, TypeError):
+                    pass
+    
+    # Check all possible date fields
+    add_date('created', crossref_data.get('created'))
+    add_date('deposited', crossref_data.get('deposited'))
+    add_date('published-online', crossref_data.get('published-online'))
+    add_date('published-print', crossref_data.get('published-print'))
+    add_date('published', crossref_data.get('published'))
+    
+    # Also check journal-issue dates
+    if crossref_data.get('journal-issue'):
+        ji = crossref_data['journal-issue']
+        add_date('journal-issue-published-online', ji.get('published-online'))
+        add_date('journal-issue-published-print', ji.get('published-print'))
+    
+    # Also check 'start' field if present (for conferences, etc.)
+    if crossref_data.get('start'):
+        add_date('start', crossref_data.get('start'))
+    
+    if not available_dates:
+        return None
+    
+    # Sort by date (earliest first)
+    available_dates.sort(key=lambda x: x[0])
+    
+    # Return the earliest date
+    earliest_dt, earliest_parts, field_used = available_dates[0]
+    
+    # Debug logging
+    print(f"📅 [EARLIEST DATE MODE] Using {field_used}: {earliest_parts} (from {len(available_dates)} available dates)")
+    
+    return earliest_parts
+
+def extract_issue_related_date_from_crossref(crossref_data):
+    """
+    Extract ISSUE-RELATED date from Crossref data (journal publication logic).
+    Priority: published-print -> journal-issue-published-online -> published-online -> published
+    Returns date-parts list or None if no date found.
+    """
+    if not crossref_data:
+        return None
+    
+    date_parts = None
+    field_used = None
+    
+    # 1. Priority: published-print (print version)
+    if crossref_data.get('published-print'):
+        date_parts = crossref_data['published-print'].get('date-parts')
+        if date_parts and date_parts[0]:
+            field_used = 'published-print'
+    
+    # 2. Priority: journal-issue -> published-online (issue online date)
+    if not date_parts and crossref_data.get('journal-issue'):
+        journal_issue = crossref_data['journal-issue']
+        if journal_issue.get('published-online'):
+            date_parts = journal_issue['published-online'].get('date-parts')
+            if date_parts and date_parts[0]:
+                field_used = 'journal-issue-published-online'
+    
+    # 3. Priority: published-online (general online publication)
+    if not date_parts and crossref_data.get('published-online'):
+        date_parts = crossref_data['published-online'].get('date-parts')
+        if date_parts and date_parts[0]:
+            field_used = 'published-online'
+    
+    # 4. Fallback: published (legacy field)
+    if not date_parts and crossref_data.get('published'):
+        date_parts = crossref_data['published'].get('date-parts')
+        if date_parts and date_parts[0]:
+            field_used = 'published'
+    
+    # 5. Last resort: created (record creation date)
+    if not date_parts and crossref_data.get('created'):
+        date_parts = crossref_data['created'].get('date-parts')
+        if date_parts and date_parts[0]:
+            field_used = 'created'
+            print(f"⚠️ [ISSUE DATE MODE] Using 'created' as fallback")
+    
+    if date_parts and field_used:
+        print(f"📅 [ISSUE DATE MODE] Using {field_used}: {date_parts[0]}")
+    else:
+        print(f"⚠️ [ISSUE DATE MODE] No publication date found in Crossref data")
+    
+    return date_parts[0] if date_parts else None
+
+def get_publication_date_from_crossref(crossref_data, mode=None):
+    """
+    Unified function to get publication date from Crossref data based on selected mode.
+    
+    Args:
+        crossref_data: Crossref metadata dictionary
+        mode: 'earliest' or 'issue'. If None, uses current session mode.
+    
+    Returns:
+        Date parts list [year, month, day] or None if not found
+    """
+    if mode is None:
+        mode = get_date_mode()
+    
+    if mode == DATE_MODE_EARLIEST:
+        return extract_earliest_date_from_crossref(crossref_data)
+    elif mode == DATE_MODE_ISSUE:
+        return extract_issue_related_date_from_crossref(crossref_data)
+    else:
+        # Default to issue mode
+        return extract_issue_related_date_from_crossref(crossref_data)
+
+def get_publication_year_from_metadata(metadata, mode=None):
+    """
+    Get publication year from metadata using selected date extraction mode.
+    Works with both Crossref and OpenAlex data.
+    
+    Args:
+        metadata: Article metadata dictionary
+        mode: 'earliest' or 'issue'. If None, uses current session mode.
+    
+    Returns:
+        Year as integer or None if not found
+    """
+    if not metadata:
+        return None
+    
+    if mode is None:
+        mode = get_date_mode()
+    
+    # Try Crossref first
+    cr_data = metadata.get('crossref')
+    if cr_data:
+        date_parts = get_publication_date_from_crossref(cr_data, mode)
+        if date_parts and len(date_parts) >= 1:
+            try:
+                return int(date_parts[0])
+            except (ValueError, TypeError):
+                pass
+    
+    # Try OpenAlex as fallback
+    oa_data = metadata.get('openalex')
+    if oa_data:
+        pub_date = oa_data.get('publication_date')
+        if pub_date:
+            try:
+                # Parse date from OpenAlex (format: "2023-12-31")
+                return int(pub_date[:4])
+            except (ValueError, TypeError):
+                pass
+        
+        # Alternative source in OpenAlex
+        pub_year = oa_data.get('publication_year')
+        if pub_year:
+            try:
+                return int(pub_year)
+            except (ValueError, TypeError):
+                pass
+    
+    return None
+
+def debug_date_extraction(metadata_list, issn, year_range, sample_size=20):
+    """
+    Debug function to log how dates are being extracted.
+    Helps understand why articles might be missing from analysis.
+    """
+    date_mode = get_date_mode()
+    date_mode_name = "earliest" if date_mode == DATE_MODE_EARLIEST else "issue-related"
+    
+    print(f"\n🔍 DATE EXTRACTION DEBUG for ISSN {issn} in range {year_range}:")
+    print(f"📅 Using mode: {date_mode_name.upper()}")
+    print("=" * 80)
+    
+    date_stats = {
+        'total_checked': 0,
+        'with_date': 0,
+        'without_date': 0,
+        'date_fields_found': {},
+        'years_distribution': {}
+    }
+    
+    # Check a sample of articles
+    sample = metadata_list[:min(sample_size, len(metadata_list))]
+    
+    for i, meta in enumerate(sample):
+        if not meta or not meta.get('crossref'):
+            continue
+            
+        cr = meta['crossref']
+        doi = cr.get('DOI', f'Article_{i+1}')
+        date_stats['total_checked'] += 1
+        
+        # Get date using current mode
+        date_parts = get_publication_date_from_crossref(cr)
+        
+        if date_parts and len(date_parts) >= 1:
+            date_stats['with_date'] += 1
+            year = date_parts[0]
+            
+            # Track year distribution
+            if year not in date_stats['years_distribution']:
+                date_stats['years_distribution'][year] = 0
+            date_stats['years_distribution'][year] += 1
+            
+            # Also check what fields are available
+            available_fields = []
+            for field in ['published-print', 'published-online', 'published', 'created', 'deposited']:
+                if cr.get(field) and cr[field].get('date-parts'):
+                    available_fields.append(field)
+            
+            # Check journal-issue separately
+            if cr.get('journal-issue'):
+                ji = cr['journal-issue']
+                if ji.get('published-online') and ji['published-online'].get('date-parts'):
+                    available_fields.append('journal-issue-published-online')
+                if ji.get('published-print') and ji['published-print'].get('date-parts'):
+                    available_fields.append('journal-issue-published-print')
+            
+            for field in available_fields:
+                date_stats['date_fields_found'][field] = date_stats['date_fields_found'].get(field, 0) + 1
+            
+            print(f"\n📄 Article {i+1}: {doi}")
+            print(f"   Selected date: {date_parts} (year: {year})")
+            print(f"   Available date fields: {', '.join(available_fields) if available_fields else 'None'}")
+        else:
+            date_stats['without_date'] += 1
+            print(f"\n📄 Article {i+1}: {doi}")
+            print(f"   ❌ No date found using {date_mode_name} mode")
+    
+    # Print statistics
+    print(f"\n📊 DATE STATISTICS:")
+    print(f"Total articles checked: {date_stats['total_checked']}")
+    print(f"Articles with date: {date_stats['with_date']} ({date_stats['with_date']/date_stats['total_checked']*100:.1f}%)")
+    print(f"Articles without date: {date_stats['without_date']} ({date_stats['without_date']/date_stats['total_checked']*100:.1f}%)")
+    
+    if date_stats['date_fields_found']:
+        print(f"\n📋 Date fields found in articles:")
+        for field, count in sorted(date_stats['date_fields_found'].items(), key=lambda x: x[1], reverse=True):
+            percentage = count / date_stats['total_checked'] * 100
+            print(f"   {field}: {count} ({percentage:.1f}%)")
+    
+    if date_stats['years_distribution']:
+        print(f"\n📅 Publication years distribution:")
+        for year in sorted(date_stats['years_distribution'].keys()):
+            count = date_stats['years_distribution'][year]
+            print(f"   {year}: {count} articles")
+    
+    print("=" * 80)
+    
+    return date_stats
+
+def validate_articles_by_date(articles, from_year, until_year):
+    """
+    Validate and filter articles by publication date using current date mode.
+    Returns filtered articles and validation statistics.
+    """
+    date_mode = get_date_mode()
+    date_mode_name = "earliest" if date_mode == DATE_MODE_EARLIEST else "issue-related"
+    
+    print(f"\n🔍 Validating articles by date ({date_mode_name} mode): {from_year}-{until_year}")
+    
+    validated = []
+    stats = {
+        'total': len(articles),
+        'valid': 0,
+        'invalid': 0,
+        'no_date': 0,
+        'out_of_range': 0,
+        'valid_years': {}
+    }
+    
+    for i, article in enumerate(articles):
+        if not article or not article.get('crossref'):
+            continue
+            
+        cr = article['crossref']
+        doi = cr.get('DOI', f'Article_{i+1}')
+        
+        # Get publication year using current mode
+        year = get_publication_year_from_metadata({'crossref': cr})
+        
+        if year is None:
+            stats['no_date'] += 1
+            print(f"⚠️ Article {doi}: No publication date found")
+            # Still include for other analyses
+            validated.append(article)
+        elif from_year <= year <= until_year:
+            stats['valid'] += 1
+            if year not in stats['valid_years']:
+                stats['valid_years'][year] = 0
+            stats['valid_years'][year] += 1
+            validated.append(article)
+            print(f"✅ Article {doi}: Year {year} within range")
+        else:
+            stats['out_of_range'] += 1
+            stats['invalid'] += 1
+            print(f"❌ Article {doi}: Year {year} outside range {from_year}-{until_year}")
+    
+    print(f"\n📊 Date validation results ({date_mode_name} mode):")
+    print(f"   Total articles: {stats['total']}")
+    print(f"   Valid (in range): {stats['valid']} ({stats['valid']/stats['total']*100:.1f}%)")
+    print(f"   Invalid (out of range): {stats['invalid']} ({stats['invalid']/stats['total']*100:.1f}%)")
+    print(f"   No date found: {stats['no_date']} ({stats['no_date']/stats['total']*100:.1f}%)")
+    
+    if stats['valid_years']:
+        print(f"\n📅 Valid years distribution:")
+        for year in sorted(stats['valid_years'].keys()):
+            count = stats['valid_years'][year]
+            print(f"   {year}: {count} articles")
+    
+    return validated, stats
+
 # === 2. Crossref Metadata Retrieval ===
 def get_crossref_metadata(doi, state):
     if doi in state.crossref_cache:
@@ -1806,14 +2149,35 @@ def extract_journal_info(metadata):
 
 # === 8. Article Retrieval from Crossref ===
 def fetch_articles_by_issn_period(issn, from_date, until_date):
+    """
+    Fetch articles from Crossref by ISSN and date range.
+    Uses selected date extraction mode for filtering.
+    """
     base_url = "https://api.crossref.org/works"
     items = []
     cursor = "*"
+    
+    # Get current date mode
+    date_mode = get_date_mode()
+    date_mode_name = "earliest" if date_mode == DATE_MODE_EARLIEST else "issue-related"
+    
+    # Parse year range
+    from_year = int(from_date.split('-')[0]) if '-' in from_date else int(from_date)
+    until_year = int(until_date.split('-')[0]) if '-' in until_date else int(until_date)
+    
+    # Build filter - Crossref searches across all date fields by default
+    filter_parts = [
+        f'issn:{issn}',
+        f'from-pub-date:{from_date}',
+        f'until-pub-date:{until_date}'
+    ]
+    
     params = {
-        'filter': f'issn:{issn},from-pub-date:{from_date},until-pub-date:{until_date}',
+        'filter': ','.join(filter_parts),
         'rows': 1000,
         'cursor': cursor,
-        'mailto': EMAIL
+        'mailto': EMAIL,
+        'select': 'DOI,title,author,published,published-print,published-online,created,deposited,journal-issue,reference-count,is-referenced-by-count,container-title,publisher,ISSN,type'  # Select only needed fields
     }
     
     progress_bar = st.progress(0)
@@ -1821,43 +2185,109 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
     progress_container = st.container()
     
     with progress_container:
-        st.info("📥 " + translation_manager.get_text('loading_articles') + " **Crossref** " + translation_manager.get_text('and') + " **OpenAlex**. " + translation_manager.get_text('analysis_may_take_time') + " " + translation_manager.get_text('reduce_period_recommended'))
+        st.info(f"📥 Loading articles from **Crossref** and **OpenAlex**. Analysis may take some time. Reducing the period is recommended.")
+        st.info(f"🔍 Searching for articles with {date_mode_name} dates in range: {from_date} - {until_date}")
+        st.info(f"📅 Using date extraction mode: **{date_mode_name.upper()} DATE**")
+    
+    total_items = 0
+    page = 0
+    filtered_count = 0
     
     while cursor:
+        page += 1
         params['cursor'] = cursor
+        
         success = False
-        for _ in range(RETRIES):
+        for attempt in range(RETRIES):
             try:
                 rate_limiter.wait_if_needed()
                 resp = requests.get(base_url, params=params, timeout=15)
+                
                 if resp.status_code == 200:
                     data = resp.json()
-                    new_items = data['message']['items']
-                    items.extend(new_items)
+                    new_items = data['message'].get('items', [])
+                    
+                    if not new_items:
+                        print(f"ℹ️ Page {page}: No new articles found")
+                        break
+                    
+                    print(f"📄 Page {page}: Received {len(new_items)} articles from Crossref API")
+                    
+                    # Filter articles based on our date extraction mode
+                    filtered_items = []
+                    for item in new_items:
+                        # Get publication date using selected mode
+                        date_parts = get_publication_date_from_crossref(item)
+                        
+                        if date_parts and len(date_parts) >= 1:
+                            year = date_parts[0]
+                            
+                            # Check if year is within range
+                            if from_year <= year <= until_year:
+                                filtered_items.append(item)
+                                doi = item.get('DOI', 'N/A')
+                                print(f"✅ Article {doi} added: publication year {year} (mode: {date_mode_name})")
+                            else:
+                                filtered_count += 1
+                                doi = item.get('DOI', 'N/A')
+                                print(f"❌ Article {doi} filtered out: year {year} outside range {from_year}-{until_year}")
+                        else:
+                            # If no date found, include for analysis but log warning
+                            filtered_items.append(item)
+                            doi = item.get('DOI', 'N/A')
+                            print(f"⚠️ Article {doi} added without date validation (no date found)")
+                    
+                    items.extend(filtered_items)
+                    total_items += len(filtered_items)
+                    
                     cursor = data['message'].get('next-cursor')
                     
-                    status_text.text(f"📥 {translation_manager.get_text('loaded_articles').format(count=len(items))}")
-                    if cursor:
-                        progress = min(len(items) / (len(items) + 100), 0.95)
+                    status_text.text(f"📥 Loaded articles: {total_items} (page {page})")
+                    
+                    if cursor and total_items > 0:
+                        # Progress bar estimation
+                        progress = min(total_items / (total_items + 500), 0.95)
                         progress_bar.progress(progress)
+                    
+                    print(f"📊 Page {page}: {len(new_items)} received, {len(filtered_items)} after filtering, total: {total_items}")
                     
                     delayer.wait(success=True)
                     success = True
                     break
+                    
+                elif resp.status_code == 404:
+                    print(f"⚠️ Page {page}: 404 Not Found")
+                    break
+                    
+                else:
+                    print(f"⚠️ Page {page}: Status {resp.status_code}")
+                    if attempt < RETRIES - 1:
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                    
             except Exception as e:
-                st.error(translation_manager.get_text('loading_error').format(error=e))
+                print(f"❌ Error on page {page}, attempt {attempt+1}/{RETRIES}: {e}")
+                if attempt < RETRIES - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+            
             delayer.wait(success=False)
+        
         if not success:
+            print(f"🚫 Failed to load page {page} after {RETRIES} attempts")
             break
+        
         if not new_items:
+            print(f"ℹ️ Page {page}: No new items, ending")
             break
     
     progress_bar.progress(1.0)
-    status_text.text(f"✅ {translation_manager.get_text('articles_loaded').format(count=len(items))}")
+    status_text.text(f"✅ Articles loaded: {total_items}")
     time.sleep(0.5)
     progress_bar.empty()
     status_text.empty()
     progress_container.empty()
+    
+    print(f"🎯 Total loaded {total_items} articles for ISSN {issn} in period {from_date}-{until_date}")
+    print(f"📊 Filtered out {filtered_count} articles based on {date_mode_name} date mode")
     
     return items
 
@@ -1982,10 +2412,20 @@ def analyze_citation_accumulation(analyzed_metadata, state):
             if not analyzed_doi:
                 continue
                 
-            pub_year = analyzed['crossref'].get('published', {}).get('date-parts', [[0]])[0][0]
-            if not pub_year:
+            date_parts = get_publication_date_from_crossref(analyzed['crossref'])
+            if not date_parts or len(date_parts) < 1:
                 continue
+                
+            pub_year = date_parts[0]
+            pub_month = date_parts[1] if len(date_parts) > 1 else 1
+            pub_day = date_parts[2] if len(date_parts) > 2 else 1
             
+            try:
+                analyzed_date = datetime(pub_year, pub_month, pub_day)
+            except ValueError:
+                # If date is invalid, use first day of the year
+                analyzed_date = datetime(pub_year, 1, 1)
+    
             citings = get_citing_dois_and_metadata((analyzed_doi, state))
             
             for citing in citings:
@@ -2113,9 +2553,29 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
                     name = family or 'Unknown'
                 author_freq[name] += 1
 
-            date_parts = cr.get('published', {}).get('date-parts', [[datetime.now().year]])[0]
-            pub_date = datetime(date_parts[0], date_parts[1] if len(date_parts)>1 else 1, date_parts[2] if len(date_parts)>2 else 1)
-            pub_dates.append(pub_date)
+            date_parts = get_publication_date_from_crossref(cr)
+            if date_parts and len(date_parts) >= 1:
+                year = date_parts[0]
+                month = date_parts[1] if len(date_parts) > 1 else 1
+                day = date_parts[2] if len(date_parts) > 2 else 1
+                
+                # Validate date
+                try:
+                    pub_date = datetime(year, month, day)
+                    pub_dates.append(pub_date)
+                except ValueError as e:
+                    print(f"⚠️ Invalid date in article: {year}-{month}-{day}: {e}")
+                    # Use only year if date is invalid
+                    try:
+                        pub_date = datetime(year, 1, 1)
+                        pub_dates.append(pub_date)
+                    except:
+                        print(f"❌ Could not create date from year {year}")
+            else:
+                # If no date found, use current year as fallback
+                current_year = datetime.now().year
+                pub_dates.append(datetime(current_year, 1, 1))
+                print(f"⚠️ No publication date found for article, using {current_year} as fallback")
 
             journal_name = cr.get('container-title', [''])[0] if cr.get('container-title') else ''
             if journal_name:
@@ -2247,7 +2707,8 @@ def enhanced_stats_calculation(analyzed_metadata, citing_metadata, state):
         if analyzed and analyzed.get('crossref'):
             analyzed_doi = analyzed['crossref'].get('DOI')
             if analyzed_doi:
-                analyzed_year = analyzed['crossref'].get('published', {}).get('date-parts', [[0]])[0][0]
+                date_parts = get_publication_date_from_crossref(analyzed['crossref'])
+                analyzed_year = date_parts[0] if date_parts and len(date_parts) > 0 else 0
                 citings = get_citing_dois_and_metadata((analyzed_doi, state))
                 citation_counts.append(len(citings))
                 
@@ -5594,7 +6055,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                     'Authors_OpenAlex': safe_join(article_data['authors'])[:300],  # ИЗ КЭША
                     'Affiliations': safe_join(article_data['affiliations'])[:500],  # ИЗ КЭША
                     'Countries': safe_join(article_data['countries'])[:100],  # ИЗ КЭША
-                    'Publication_Year': safe_convert(cr.get('published', {}).get('date-parts', [[0]])[0][0]),
+                    'Publication_Year': safe_convert(get_publication_year_from_metadata({'crossref': cr}) or 0),
                     'Journal': safe_convert(journal_info['journal_name'])[:100],  # ИЗ КЭША
                     'Publisher': safe_convert(journal_info['publisher'])[:100],  # ИЗ КЭША
                     'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],  # ИЗ КЭША
@@ -5651,7 +6112,7 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                         'Authors_OpenAlex': safe_join(authors_list)[:300],
                         'Affiliations': safe_join(affiliations_list)[:500],
                         'Countries': safe_join(countries_list)[:100],
-                        'Publication_Year': safe_convert(cr.get('published', {}).get('date-parts', [[0]])[0][0]),
+                        'Publication_Year': safe_convert(get_publication_year_from_metadata({'crossref': cr}) or 0),
                         'Journal': safe_convert(journal_info['journal_name'])[:100],
                         'Publisher': safe_convert(journal_info['publisher'])[:100],
                         'ISSN': safe_join([str(issn) for issn in journal_info['issn'] if issn])[:50],
@@ -6720,6 +7181,16 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     # Data validation
     overall_status.text(translation_manager.get_text('validating_data'))
     validated_items = validate_and_clean_data(items)
+    
+    # Additional date-based validation
+    from_year = int(from_date.split('-')[0]) if '-' in from_date else int(from_date)
+    until_year = int(until_date.split('-')[0]) if '-' in until_date else int(until_date)
+    
+    date_validated_items, date_stats = validate_articles_by_date(validated_items, from_year, until_year)
+    
+    st.info(f"📊 Date validation: {date_stats['valid']}/{date_stats['total']} articles "
+            f"({date_stats['valid']/date_stats['total']*100:.1f}%) within date range "
+            f"{from_year}-{until_year} using {get_date_mode()} mode")
     journal_prefix = get_doi_prefix(validated_items[0].get('DOI', '')) if validated_items else ''
     overall_progress.progress(0.4)
     
@@ -6914,6 +7385,8 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
         'analysis_duration': total_duration,
         'data_analysis_time': analysis_duration,
         'excel_generation_time': excel_duration,
+        'date_extraction_mode': get_date_mode(),
+        'date_extraction_mode_name': "earliest" if get_date_mode() == DATE_MODE_EARLIEST else "issue-related",
         'analyzed_stats': analyzed_stats,
         'citing_stats': citing_stats,
         'enhanced_stats': enhanced_stats,
@@ -6999,6 +7472,66 @@ def main_optimized():
             help=translation_manager.get_text('period_examples'),
             disabled=special_analysis
         )
+        
+        st.markdown("---")
+        st.header("📅 Date Extraction Settings")
+        
+        # Initialize date mode in session state if not exists
+        if 'date_extraction_mode' not in st.session_state:
+            st.session_state.date_extraction_mode = DATE_MODE_ISSUE
+        
+        # Create two mutually exclusive checkboxes
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            use_earliest_date = st.checkbox(
+                "Use earliest available date",
+                value=(st.session_state.date_extraction_mode == DATE_MODE_EARLIEST),
+                help="Use the earliest date found in Crossref (created, deposited, published-online, etc.)",
+                key="checkbox_earliest"
+            )
+        
+        with col2:
+            use_issue_date = st.checkbox(
+                "Use issue-related date",
+                value=(st.session_state.date_extraction_mode == DATE_MODE_ISSUE),
+                help="Use journal publication logic: published-print -> journal-issue date -> published-online -> published",
+                key="checkbox_issue"
+            )
+        
+        # Handle mutual exclusivity
+        if use_earliest_date and use_issue_date:
+            # Both checked - this shouldn't happen with proper UI logic, but handle it
+            st.warning("Please select only one date extraction method")
+        elif use_earliest_date:
+            set_date_mode(DATE_MODE_EARLIEST)
+            st.info("📅 **EARLIEST DATE MODE**: Using the earliest available date from Crossref")
+        elif use_issue_date:
+            set_date_mode(DATE_MODE_ISSUE)
+            st.info("📅 **ISSUE DATE MODE**: Using journal publication dates (print -> issue -> online)")
+        else:
+            # Default to issue mode
+            set_date_mode(DATE_MODE_ISSUE)
+            st.info("📅 **ISSUE DATE MODE**: Using journal publication dates (default)")
+        
+        # Add explanation
+        with st.expander("ℹ️ About date extraction modes", expanded=False):
+            st.markdown("""
+            **Earliest Date Mode:**
+            - Uses the earliest available date in Crossref
+            - Priority: `created` → `deposited` → `published-online` → `published-print` → `published`
+            - Best for: Conference papers, preprints, or when you want to capture the earliest record
+            
+            **Issue-Related Date Mode:**
+            - Uses traditional journal publication logic
+            - Priority: `published-print` → `journal-issue-published-online` → `published-online` → `published`
+            - Best for: Traditional journal articles, especially when issue dates matter
+            
+            **Why this matters:**
+            - Electronic journals often have multiple dates (online first vs. issue publication)
+            - The chosen mode affects which articles are included in your date range filter
+            - If you're not finding expected articles, try switching modes
+            """)
         
         st.markdown("---")
         
@@ -7159,6 +7692,9 @@ def main_optimized():
         
         results = state.analysis_results
 
+        date_mode = results.get('date_extraction_mode_name', 'issue-related')
+        st.info(f"📅 **Date extraction mode used:** {date_mode.upper()}")
+
         if 'analysis_duration' in results:
             total_minutes = int(results['analysis_duration'] // 60)
             total_seconds = int(results['analysis_duration'] % 60)
@@ -7195,3 +7731,4 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
