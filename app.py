@@ -228,7 +228,7 @@ def parallel_analyses(analyzed_metadata, citing_metadata, state, citation_timing
         else:
             future_ror = None
         
-        # Collect results - ИСПРАВЛЕНО: гарантируем получение всех результатов
+        # Collect results
         try:
             keywords_result = future_keywords.result()
         except Exception as e:
@@ -7306,6 +7306,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
