@@ -51,7 +51,6 @@ _article_data_cache = {}
 _journal_info_cache = {}
 
 def cached_extract_article_data(metadata):
-    """Кэшированное извлечение всех данных статьи"""
     if not metadata:
         return {'authors': [], 'affiliations': [], 'countries': []}
     
@@ -7179,6 +7178,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
