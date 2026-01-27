@@ -4864,7 +4864,6 @@ def batch_get_journal_websites(journal_names, analyzed_data, citing_data):
         if item and item.get('openalex'):
             all_works.append(item.get('openalex'))
     
-    # Добавляем цитирующие работы
     for item in citing_data:
         if item and item.get('openalex'):
             all_works.append(item.get('openalex'))
@@ -7671,4 +7670,5 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
