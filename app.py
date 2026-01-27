@@ -1615,6 +1615,9 @@ def get_journal_name(issn):
                 data = resp.json()
                 if data['meta']['count'] > 0:
                     name = data['results'][0]['display_name']
+                    name = data['results'][0]['display_name']
+                    if name:
+                        name = name.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
                     if 'journals' not in state.crossref_cache:
                         state.crossref_cache['journals'] = {}
                     state.crossref_cache['journals'][issn] = name
@@ -1781,7 +1784,11 @@ def extract_journal_info(metadata):
     cr = metadata.get('crossref')
     if cr:
         journal_info['issn'] = cr.get('ISSN', [])
-        journal_info['journal_name'] = cr.get('container-title', [''])[0] if cr.get('container-title') else ''
+        raw_name = cr.get('container-title', [''])[0] if cr.get('container-title') else ''
+        if raw_name:
+            journal_info['journal_name'] = raw_name.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
+        else:
+            journal_info['journal_name'] = ''
         journal_info['publisher'] = cr.get('publisher', '')
     
     oa = metadata.get('openalex')
@@ -2109,8 +2116,10 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
             date_parts = cr.get('published', {}).get('date-parts', [[datetime.now().year]])[0]
             pub_date = datetime(date_parts[0], date_parts[1] if len(date_parts)>1 else 1, date_parts[2] if len(date_parts)>2 else 1)
             pub_dates.append(pub_date)
-            
+
             journal_name = cr.get('container-title', [''])[0] if cr.get('container-title') else ''
+            if journal_name:
+                journal_name = journal_name.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
             publisher = cr.get('publisher', '')
             if journal_name:
                 journal_freq[journal_name] += 1
@@ -2142,6 +2151,8 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
                 host_venue = oa.get('host_venue', {})
                 if host_venue:
                     journal_name = host_venue.get('display_name', '')
+                    if journal_name:
+                        journal_name = journal_name.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
                     publisher = host_venue.get('publisher', '')
                     if journal_name and journal_name not in journal_freq:
                         journal_freq[journal_name] += 1
@@ -4445,11 +4456,15 @@ def batch_get_journal_websites(journal_names, analyzed_data, citing_data):
             # Метод 1: Из host_venue
             if work.get('host_venue'):
                 journal_name = work['host_venue'].get('display_name')
+                if journal_name:
+                    journal_name = journal_name.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
                 source_id = work['host_venue'].get('id')
             
             # Метод 2: Из primary_location
             if not journal_name and work.get('primary_location', {}).get('source'):
                 journal_name = work['primary_location']['source'].get('display_name')
+                if journal_name:
+                    journal_name = journal_name.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
                 source_id = work['primary_location']['source'].get('id')
             
             if not journal_name or not source_id:
@@ -5922,6 +5937,8 @@ def create_enhanced_excel_report(analyzed_data, citing_data, analyzed_stats, cit
                 
                 for idx, journal_info in enumerate(citing_stats['all_journals']):
                     journal_name = journal_info[0]
+                    if journal_name:
+                        journal_name = journal_name.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
                     count = journal_info[1]
                     percentage = (safe_convert(count) / total_citing_articles * 100) if total_citing_articles > 0 else 0
                     
@@ -7178,6 +7195,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
