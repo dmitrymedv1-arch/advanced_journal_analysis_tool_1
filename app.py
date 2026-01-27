@@ -7082,7 +7082,7 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     state = get_analysis_state()
     state.analysis_complete = False
 
-    st.info(f"📅 **Режим анализа дат:** {'Первая доступная дата' if date_mode == DATE_MODE_FIRST else 'Дата выпуска журнала'}")
+    st.info(f"📅 **Режим анализа дат:** {'Первая доступная дата' if state.date_analysis_mode == DATE_MODE_FIRST else 'Дата выпуска журнала'}")
     
     # Функция для обновления счетчика общего времени
     def update_timer():
@@ -7670,5 +7670,6 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
