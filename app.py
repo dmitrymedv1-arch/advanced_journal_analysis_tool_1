@@ -7584,57 +7584,47 @@ def main_optimized():
         # Date Strategy Selection
         st.subheader("📅 Date Analysis Strategy")
         
-        # Initialize session state for checkboxes if not exists
-        if 'use_start_created' not in st.session_state:
-            st.session_state.use_start_created = False
-        if 'use_issue_priority' not in st.session_state:
-            st.session_state.use_issue_priority = True  # Default to issue priority
+        # Create mutually exclusive checkboxes using session state
+        if 'date_strategy' not in st.session_state:
+            st.session_state.date_strategy = 'issue_priority'  # Default
         
-        # Create columns for exclusive checkboxes
         col1, col2 = st.columns(2)
         
         with col1:
             # Checkbox for start/created dates
             use_start_created = st.checkbox(
                 "Use start/created dates",
-                value=st.session_state.use_start_created,
+                value=(st.session_state.date_strategy == 'start_created'),
                 help="Use earliest available dates: start → created",
-                key='start_created_checkbox',
-                disabled=st.session_state.use_issue_priority  # Disable if issue priority is selected
+                key="checkbox_start_created",
+                on_change=lambda: st.session_state.update({'date_strategy': 'start_created'}) if st.session_state.checkbox_start_created else None
             )
-            
-            # Update session state when checkbox changes
-            if use_start_created != st.session_state.use_start_created:
-                st.session_state.use_start_created = use_start_created
-                # If this one is selected, unselect the other
-                if use_start_created:
-                    st.session_state.use_issue_priority = False
-                    st.rerun()
         
         with col2:
             # Checkbox for issue priority dates
             use_issue_priority = st.checkbox(
                 "Use issue priority dates", 
-                value=st.session_state.use_issue_priority,
+                value=(st.session_state.date_strategy == 'issue_priority'),
                 help="Use publication dates: published-print → journal-issue.published-online → published-online → published",
-                key='issue_priority_checkbox',
-                disabled=st.session_state.use_start_created  # Disable if start/created is selected
+                key="checkbox_issue_priority",
+                on_change=lambda: st.session_state.update({'date_strategy': 'issue_priority'}) if st.session_state.checkbox_issue_priority else None
             )
-            
-            # Update session state when checkbox changes
-            if use_issue_priority != st.session_state.use_issue_priority:
-                st.session_state.use_issue_priority = use_issue_priority
-                # If this one is selected, unselect the other
-                if use_issue_priority:
-                    st.session_state.use_start_created = False
-                    st.rerun()
         
-        # Set date strategy based on selection
-        if st.session_state.use_start_created:
-            date_strategy = 'start_created'
+        # Ensure only one is checked at a time
+        if use_start_created and use_issue_priority:
+            # If both become checked (shouldn't happen with proper logic), uncheck the other
+            if st.session_state.date_strategy == 'start_created':
+                st.session_state.checkbox_issue_priority = False
+            else:
+                st.session_state.checkbox_start_created = False
+        
+        # Set date strategy based on session state
+        date_strategy = st.session_state.date_strategy
+        
+        # Show strategy info
+        if date_strategy == 'start_created':
             st.info("🔍 Date strategy: **Start/Created dates** - Using earliest available dates (start → created)")
         else:
-            date_strategy = 'issue_priority'
             st.info("🔍 Date strategy: **Issue priority dates** - Using official publication dates")
         
         st.markdown("---")
@@ -7876,6 +7866,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
