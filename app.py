@@ -7581,32 +7581,33 @@ def main_optimized():
         
         st.markdown("---")
 
+        # Date Strategy Selection
         st.subheader("📅 Date Analysis Strategy")
         
-        # Initialize session state for toggle
-        if 'use_start_created' not in st.session_state:
-            st.session_state.use_start_created = False
-        
-        # Toggle for date strategy
-        use_start_created = st.toggle(
-            "Use start/created dates (instead of issue priority dates)",
-            value=st.session_state.use_start_created,
-            help="Toggle ON for start/created dates, OFF for issue priority dates",
-            key="date_strategy_toggle"
+        # Use radio buttons for mutually exclusive selection
+        date_strategy = st.radio(
+            "Select date analysis strategy:",
+            options=['issue_priority', 'start_created'],
+            format_func=lambda x: "Use issue priority dates" if x == 'issue_priority' else "Use start/created dates",
+            help="Choose which dates to use for filtering articles",
+            index=0  # Default to issue_priority
         )
         
-        # Update session state
-        st.session_state.use_start_created = use_start_created
-        
-        # Set date strategy
-        if use_start_created:
-            date_strategy = 'start_created'
-            st.info("🔍 **Start/Created dates**: Using earliest available dates (start → created)")
-            st.caption("This strategy uses the earliest dates when articles first appeared online")
+        # Show strategy info with detailed explanation
+        if date_strategy == 'start_created':
+            st.info("""
+            🔍 **Start/Created dates strategy**:
+            - Uses earliest available dates: start → created
+            - Best for tracking when articles first appeared online
+            - May include articles before official journal issue publication
+            """)
         else:
-            date_strategy = 'issue_priority'
-            st.info("🔍 **Issue priority dates**: Using official publication dates")
-            st.caption("This strategy uses dates from journal issues (published-print → journal-issue.published-online → published-online → published)")
+            st.info("""
+            🔍 **Issue priority dates strategy**:
+            - Uses official publication dates: published-print → journal-issue.published-online → published-online → published
+            - Best for matching articles with specific journal issues
+            - Recommended for most analyses
+            """)
         
         st.markdown("---")
         
@@ -7847,6 +7848,7 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
 
