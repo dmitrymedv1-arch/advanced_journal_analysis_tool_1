@@ -1686,52 +1686,52 @@ class DateExtractionManager:
 # Initialize global date extraction manager
 date_extraction_manager = DateExtractionManager()
 
-    def extract_publication_date_from_crossref(crossref_data):
-        """
-        Extract publication date from Crossref data using current strategy.
-        This is the main function to use throughout the codebase.
-        """
-        if not crossref_data:
-            return None
-        
-        return date_extraction_manager.extract_date(crossref_data)
-    
-    
-    def get_publication_year_from_metadata(metadata):
-        """
-        Get publication year from metadata using the current date extraction strategy.
-        Works with both Crossref and OpenAlex data.
-        """
-        if not metadata:
-            return None
-        
-        # Try from Crossref first
-        cr_data = metadata.get('crossref')
-        if cr_data:
-            date_parts = extract_publication_date_from_crossref(cr_data)
-            if date_parts and len(date_parts) >= 1:
-                return date_parts[0]
-        
-        # Try from OpenAlex
-        oa_data = metadata.get('openalex')
-        if oa_data:
-            pub_date = oa_data.get('publication_date')
-            if pub_date:
-                try:
-                    # Parse date from OpenAlex (format: "2023-12-31")
-                    return int(pub_date[:4])
-                except (ValueError, TypeError):
-                    pass
-            
-            # Alternative source in OpenAlex
-            pub_year = oa_data.get('publication_year')
-            if pub_year:
-                try:
-                    return int(pub_year)
-                except (ValueError, TypeError):
-                    pass
-        
+def extract_publication_date_from_crossref(crossref_data):
+    """
+    Extract publication date from Crossref data using current strategy.
+    This is the main function to use throughout the codebase.
+    """
+    if not crossref_data:
         return None
+    
+    return date_extraction_manager.extract_date(crossref_data)
+
+
+def get_publication_year_from_metadata(metadata):
+    """
+    Get publication year from metadata using the current date extraction strategy.
+    Works with both Crossref and OpenAlex data.
+    """
+    if not metadata:
+        return None
+    
+    # Try from Crossref first
+    cr_data = metadata.get('crossref')
+    if cr_data:
+        date_parts = extract_publication_date_from_crossref(cr_data)
+        if date_parts and len(date_parts) >= 1:
+            return date_parts[0]
+    
+    # Try from OpenAlex
+    oa_data = metadata.get('openalex')
+    if oa_data:
+        pub_date = oa_data.get('publication_date')
+        if pub_date:
+            try:
+                # Parse date from OpenAlex (format: "2023-12-31")
+                return int(pub_date[:4])
+            except (ValueError, TypeError):
+                pass
+        
+        # Alternative source in OpenAlex
+        pub_year = oa_data.get('publication_year')
+        if pub_year:
+            try:
+                return int(pub_year)
+            except (ValueError, TypeError):
+                pass
+    
+    return None
 
     def debug_publication_dates(metadata_list, issn, year_range):
         """
@@ -7720,4 +7720,5 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
