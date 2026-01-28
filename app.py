@@ -7580,40 +7580,63 @@ def main_optimized():
         )
         
         st.markdown("---")
-        
+
         # Date Strategy Selection
         st.subheader("📅 Date Analysis Strategy")
+        
+        # Initialize session state for checkboxes if not exists
+        if 'use_start_created' not in st.session_state:
+            st.session_state.use_start_created = False
+        if 'use_issue_priority' not in st.session_state:
+            st.session_state.use_issue_priority = True  # Default to issue priority
         
         # Create columns for exclusive checkboxes
         col1, col2 = st.columns(2)
         
         with col1:
+            # Checkbox for start/created dates
             use_start_created = st.checkbox(
                 "Use start/created dates",
-                value=False,
-                help="Use earliest available dates: start → created"
+                value=st.session_state.use_start_created,
+                help="Use earliest available dates: start → created",
+                key='start_created_checkbox',
+                disabled=st.session_state.use_issue_priority  # Disable if issue priority is selected
             )
+            
+            # Update session state when checkbox changes
+            if use_start_created != st.session_state.use_start_created:
+                st.session_state.use_start_created = use_start_created
+                # If this one is selected, unselect the other
+                if use_start_created:
+                    st.session_state.use_issue_priority = False
+                    st.rerun()
         
         with col2:
+            # Checkbox for issue priority dates
             use_issue_priority = st.checkbox(
                 "Use issue priority dates", 
-                value=True,
-                help="Use publication dates: published-print → journal-issue.published-online → published-online → published"
+                value=st.session_state.use_issue_priority,
+                help="Use publication dates: published-print → journal-issue.published-online → published-online → published",
+                key='issue_priority_checkbox',
+                disabled=st.session_state.use_start_created  # Disable if start/created is selected
             )
-        
-        # Make checkboxes mutually exclusive
-        if use_start_created and use_issue_priority:
-            # If both are checked, uncheck the second one
-            use_issue_priority = False
+            
+            # Update session state when checkbox changes
+            if use_issue_priority != st.session_state.use_issue_priority:
+                st.session_state.use_issue_priority = use_issue_priority
+                # If this one is selected, unselect the other
+                if use_issue_priority:
+                    st.session_state.use_start_created = False
+                    st.rerun()
         
         # Set date strategy based on selection
-        if use_start_created:
+        if st.session_state.use_start_created:
             date_strategy = 'start_created'
             st.info("🔍 Date strategy: **Start/Created dates** - Using earliest available dates (start → created)")
         else:
             date_strategy = 'issue_priority'
             st.info("🔍 Date strategy: **Issue priority dates** - Using official publication dates")
-
+        
         st.markdown("---")
         
         # Button to compare date strategies
@@ -7853,5 +7876,6 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
