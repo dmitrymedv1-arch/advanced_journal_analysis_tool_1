@@ -1818,7 +1818,6 @@ def get_publication_year_from_metadata(metadata):
     def filter_articles_by_publication_date(articles, from_year, until_year):
         """
         Filter articles by publication date using the current date extraction strategy.
-        Returns filtered articles and statistics about filtering.
         """
         filtered = []
         stats = {
@@ -1832,58 +1831,33 @@ def get_publication_year_from_metadata(metadata):
             }
         }
         
-        # Get current strategy for logging
-        strategy_name = "Unknown"
-        if hasattr(date_extraction_manager, 'get_current_strategy_name'):
-            strategy_name = date_extraction_manager.get_current_strategy_name()
-        
-        print(f"🔍 Filtering articles by date: {from_year}-{until_year}")
-        print(f"   Using strategy: {strategy_name}")
-        
-        for i, article in enumerate(articles):
-            if not article or not article.get('crossref'):
+        for item in articles:
+            if not item or not item.get('crossref'):
                 continue
                 
-            cr = article['crossref']
-            doi = cr.get('DOI', f'Article_{i+1}')
-            
-            # Use unified method for extracting date
+            cr = item['crossref']
             date_parts = extract_publication_date_from_crossref(cr)
             
             if not date_parts or len(date_parts) < 1:
-                # If no date found, still include article for analysis
-                filtered.append(article)
+                filtered.append(item)
                 stats['no_date'] += 1
-                print(f"⚠️ Article {doi}: date not found, included in analysis")
                 continue
             
             try:
                 year = int(date_parts[0])
             except (ValueError, TypeError):
-                # If year is invalid, include article
-                filtered.append(article)
+                filtered.append(item)
                 stats['no_date'] += 1
-                print(f"⚠️ Article {doi}: invalid year {date_parts[0]}, included in analysis")
                 continue
             
-            # Check year range
             if year < from_year:
                 stats['filtered_out'] += 1
                 stats['by_reason']['before_range'] += 1
-                print(f"❌ Article {doi}: year {year} before range {from_year}-{until_year}")
             elif year > until_year:
                 stats['filtered_out'] += 1
                 stats['by_reason']['after_range'] += 1
-                print(f"❌ Article {doi}: year {year} after range {from_year}-{until_year}")
             else:
-                filtered.append(article)
-                print(f"✅ Article {doi}: year {year} within range {from_year}-{until_year}")
-        
-        print(f"📊 Filtering results:")
-        print(f"   Total articles: {stats['total']}")
-        print(f"   After filtering: {len(filtered)}")
-        print(f"   Filtered out: {stats['filtered_out']}")
-        print(f"   No date: {stats['no_date']}")
+                filtered.append(item)
         
         return filtered, stats
 
@@ -7720,5 +7694,6 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
 
