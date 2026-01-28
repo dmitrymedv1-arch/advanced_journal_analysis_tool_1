@@ -1804,13 +1804,274 @@ def extract_journal_info(metadata):
     
     return journal_info
 
+def extract_start_created_year(crossref_data):
+    """
+    Extract year based on start/created logic (for early dates).
+    Priority: start -> created
+    """
+    if not crossref_data:
+        return None, None
+    
+    # Priority 1: start
+    if 'start' in crossref_data and crossref_data['start']:
+        date_parts = crossref_data['start'].get('date-parts')
+        if date_parts and date_parts[0]:
+            return date_parts[0], 'start'
+    
+    # Priority 2: created
+    if 'created' in crossref_data and crossref_data['created']:
+        date_parts = crossref_data['created'].get('date-parts')
+        if date_parts and date_parts[0]:
+            return date_parts[0], 'created'
+    
+    return None, None
+
+def extract_issue_priority_year(crossref_data):
+    """
+    Extract year based on issue-related logic (for official publication dates).
+    Priority: published-print -> journal-issue.published-online -> published-online -> published
+    """
+    if not crossref_data:
+        return None, None
+    
+    # Priority 1: published-print (print version)
+    if 'published-print' in crossref_data and crossref_data['published-print']:
+        date_parts = crossref_data['published-print'].get('date-parts')
+        if date_parts and date_parts[0]:
+            return date_parts[0], 'published-print'
+    
+    # Priority 2: journal-issue -> published-online (issue publication date)
+    if 'journal-issue' in crossref_data and crossref_data['journal-issue']:
+        journal_issue = crossref_data['journal-issue']
+        if isinstance(journal_issue, dict) and 'published-online' in journal_issue and journal_issue['published-online']:
+            date_parts = journal_issue['published-online'].get('date-parts')
+            if date_parts and date_parts[0]:
+                return date_parts[0], 'journal-issue.published-online'
+    
+    # Priority 3: published-online (general online publication)
+    if 'published-online' in crossref_data and crossref_data['published-online']:
+        date_parts = crossref_data['published-online'].get('date-parts')
+        if date_parts and date_parts[0]:
+            return date_parts[0], 'published-online'
+    
+    # Priority 4: published (legacy field)
+    if 'published' in crossref_data and crossref_data['published']:
+        date_parts = crossref_data['published'].get('date-parts')
+        if date_parts and date_parts[0]:
+            return date_parts[0], 'published'
+    
+    return None, None
+
+def get_publication_date_by_strategy(crossref_data, date_strategy='issue_priority'):
+    """
+    Get publication date based on selected strategy.
+    date_strategy can be: 'start_created' or 'issue_priority'
+    """
+    if not crossref_data:
+        return None, None
+    
+    if date_strategy == 'start_created':
+        return extract_start_created_year(crossref_data)
+    else:  # 'issue_priority'
+        return extract_issue_priority_year(crossref_data)
+
+def debug_article_dates(article_data, doi):
+    """
+    Debug function to show all date fields in an article.
+    """
+    if not article_data or not isinstance(article_data, dict):
+        return
+    
+    print(f"\n🔍 Date debugging for DOI: {doi}")
+    
+    date_fields_to_check = [
+        'start',
+        'created', 
+        'published-print',
+        'published-online',
+        'published',
+        'issued',
+        'deposited'
+    ]
+    
+    for field in date_fields_to_check:
+        if field in article_data and article_data[field]:
+            date_parts = article_data[field].get('date-parts')
+            if date_parts and date_parts[0]:
+                print(f"  • {field}: {date_parts[0]}")
+    
+    # Check journal-issue separately
+    if 'journal-issue' in article_data and article_data['journal-issue']:
+        journal_issue = article_data['journal-issue']
+        if isinstance(journal_issue, dict):
+            if 'published-online' in journal_issue and journal_issue['published-online']:
+                date_parts = journal_issue['published-online'].get('date-parts')
+                if date_parts and date_parts[0]:
+                    print(f"  • journal-issue.published-online: {date_parts[0]}")
+
+def filter_articles_by_date_strategy(articles, from_year, until_year, date_strategy='issue_priority'):
+    """
+    Filter articles by date using specified strategy.
+    Returns filtered articles and statistics.
+    """
+    filtered = []
+    stats = {
+        'total': len(articles),
+        'filtered_out': 0,
+        'no_date': 0,
+        'by_reason': {
+            'before_range': 0,
+            'after_range': 0,
+            'invalid_date': 0
+        },
+        'date_sources': {}
+    }
+    
+    print(f"🔍 Filtering articles by date strategy: {date_strategy}")
+    print(f"📅 Target range: {from_year}-{until_year}")
+    
+    for i, article in enumerate(articles):
+        if not article or not isinstance(article, dict):
+            continue
+            
+        cr = article.get('crossref', {})
+        doi = cr.get('DOI', f'Article_{i+1}')
+        
+        # Get date using specified strategy
+        date_parts, source = get_publication_date_by_strategy(cr, date_strategy)
+        
+        # Track date sources statistics
+        if source:
+            stats['date_sources'][source] = stats['date_sources'].get(source, 0) + 1
+        
+        if not date_parts or len(date_parts) < 1:
+            # If no date found, include for analysis
+            filtered.append(article)
+            stats['no_date'] += 1
+            if i < 10:
+                print(f"⚠️ Article {doi}: date not found, included in analysis")
+            continue
+        
+        year = date_parts[0]
+        
+        # Validate year
+        try:
+            year_int = int(year)
+        except (ValueError, TypeError):
+            stats['filtered_out'] += 1
+            stats['by_reason']['invalid_date'] += 1
+            if i < 10:
+                print(f"❌ Article {doi}: invalid year {year}, filtered out")
+            continue
+        
+        # Check year range
+        if year_int < from_year:
+            stats['filtered_out'] += 1
+            stats['by_reason']['before_range'] += 1
+            if i < 10:
+                print(f"❌ Article {doi}: year {year_int} before range {from_year}-{until_year} (source: {source})")
+        elif year_int > until_year:
+            stats['filtered_out'] += 1
+            stats['by_reason']['after_range'] += 1
+            if i < 10:
+                print(f"❌ Article {doi}: year {year_int} after range {from_year}-{until_year} (source: {source})")
+        else:
+            filtered.append(article)
+            if i < 10:
+                print(f"✅ Article {doi}: year {year_int} in range {from_year}-{until_year} (source: {source})")
+    
+    print(f"📊 Filtering results:")
+    print(f"   Total articles: {stats['total']}")
+    print(f"   After filtering: {len(filtered)}")
+    print(f"   Filtered out: {stats['filtered_out']}")
+    print(f"   No date: {stats['no_date']}")
+    print(f"   Date sources: {dict(stats['date_sources'])}")
+    
+    return filtered, stats
+
+def compare_date_strategies(issn, from_year, until_year):
+    """
+    Compare date strategies to show differences.
+    Useful for debugging and understanding date discrepancies.
+    """
+    print(f"\n🔍 COMPARING DATE STRATEGIES FOR ISSN {issn}")
+    print(f"📅 Period: {from_year}-{until_year}")
+    print("=" * 80)
+    
+    # Get articles using both strategies
+    from_date = f"{from_year}-01-01"
+    until_date = f"{until_year}-12-31"
+    
+    # Fetch articles with both strategies
+    items_start = fetch_articles_by_issn_period(issn, from_date, until_date, 'start_created')
+    items_issue = fetch_articles_by_issn_period(issn, from_date, until_date, 'issue_priority')
+    
+    print(f"\n📊 RESULTS:")
+    print(f"• Articles with start/created strategy: {len(items_start)}")
+    print(f"• Articles with issue priority strategy: {len(items_issue)}")
+    
+    # Find DOIs that are only in one strategy
+    dois_start = set(item.get('DOI') for item in items_start if item.get('DOI'))
+    dois_issue = set(item.get('DOI') for item in items_issue if item.get('DOI'))
+    
+    only_in_start = dois_start - dois_issue
+    only_in_issue = dois_issue - dois_start
+    in_both = dois_start.intersection(dois_issue)
+    
+    print(f"• DOIs only in start/created: {len(only_in_start)}")
+    print(f"• DOIs only in issue priority: {len(only_in_issue)}")
+    print(f"• DOIs in both: {len(in_both)}")
+    
+    # Analyze differences
+    if only_in_start:
+        print(f"\n📝 DOIs only found with start/created strategy:")
+        for doi in list(only_in_start)[:10]:  # Show first 10
+            # Find the article to analyze its dates
+            article = next((item for item in items_start if item.get('DOI') == doi), None)
+            if article:
+                start_date, start_source = get_publication_date_by_strategy(article, 'start_created')
+                issue_date, issue_source = get_publication_date_by_strategy(article, 'issue_priority')
+                print(f"  • {doi}: start/created={start_date} ({start_source}), issue={issue_date} ({issue_source})")
+    
+    if only_in_issue:
+        print(f"\n📝 DOIs only found with issue priority strategy:")
+        for doi in list(only_in_issue)[:10]:  # Show first 10
+            article = next((item for item in items_issue if item.get('DOI') == doi), None)
+            if article:
+                start_date, start_source = get_publication_date_by_strategy(article, 'start_created')
+                issue_date, issue_source = get_publication_date_by_strategy(article, 'issue_priority')
+                print(f"  • {doi}: start/created={start_date} ({start_source}), issue={issue_date} ({issue_source})")
+    
+    # Return comparison data
+    return {
+        'start_count': len(items_start),
+        'issue_count': len(items_issue),
+        'only_start': len(only_in_start),
+        'only_issue': len(only_in_issue),
+        'both': len(in_both),
+        'sample_only_start': list(only_in_start)[:5] if only_in_start else [],
+        'sample_only_issue': list(only_in_issue)[:5] if only_in_issue else []
+    }
+
 # === 8. Article Retrieval from Crossref ===
-def fetch_articles_by_issn_period(issn, from_date, until_date):
+def fetch_articles_by_issn_period(issn, from_date, until_date, date_strategy='issue_priority'):
+    """
+    Fetch articles with configurable date strategy.
+    date_strategy: 'start_created' or 'issue_priority'
+    """
     base_url = "https://api.crossref.org/works"
     items = []
     cursor = "*"
+    
+    # Prepare filters
+    filter_parts = [
+        f'issn:{issn}',
+        f'from-pub-date:{from_date}',
+        f'until-pub-date:{until_date}'
+    ]
+    
     params = {
-        'filter': f'issn:{issn},from-pub-date:{from_date},until-pub-date:{until_date}',
+        'filter': ','.join(filter_parts),
         'rows': 1000,
         'cursor': cursor,
         'mailto': EMAIL
@@ -1821,43 +2082,117 @@ def fetch_articles_by_issn_period(issn, from_date, until_date):
     progress_container = st.container()
     
     with progress_container:
-        st.info("📥 " + translation_manager.get_text('loading_articles') + " **Crossref** " + translation_manager.get_text('and') + " **OpenAlex**. " + translation_manager.get_text('analysis_may_take_time') + " " + translation_manager.get_text('reduce_period_recommended'))
+        st.info(f"📥 {translation_manager.get_text('loading_articles')} **Crossref** {translation_manager.get_text('and')} **OpenAlex**.")
+        st.info(f"🔍 Date strategy: {'Start/Created dates' if date_strategy == 'start_created' else 'Issue priority dates'}")
+        st.info(f"📅 Date range: {from_date} to {until_date}")
+    
+    total_items = 0
+    page = 0
     
     while cursor:
+        page += 1
         params['cursor'] = cursor
+        
         success = False
-        for _ in range(RETRIES):
+        for attempt in range(RETRIES):
             try:
                 rate_limiter.wait_if_needed()
                 resp = requests.get(base_url, params=params, timeout=15)
+                
                 if resp.status_code == 200:
                     data = resp.json()
-                    new_items = data['message']['items']
-                    items.extend(new_items)
+                    new_items = data['message'].get('items', [])
+                    
+                    # Filter items based on selected date strategy
+                    filtered_items = []
+                    for item in new_items:
+                        if not item or not item.get('DOI'):
+                            continue
+                        
+                        # Extract date based on selected strategy
+                        date_parts, source = get_publication_date_by_strategy(item, date_strategy)
+                        
+                        if date_parts and len(date_parts) >= 1:
+                            year = date_parts[0]
+                            
+                            # Convert string dates to years for comparison
+                            from_year = int(from_date.split('-')[0])
+                            until_year = int(until_date.split('-')[0])
+                            
+                            if from_year <= year <= until_year:
+                                filtered_items.append(item)
+                                if total_items < 5:  # Debug first 5 items
+                                    print(f"✅ Article {item.get('DOI', 'N/A')} added: year {year} (source: {source})")
+                            else:
+                                if total_items < 5:  # Debug first 5 filtered out items
+                                    print(f"❌ Article {item.get('DOI', 'N/A')} filtered out: year {year} (source: {source}) outside range {from_year}-{until_year}")
+                        else:
+                            # If no date found, still include for analysis
+                            filtered_items.append(item)
+                            if total_items < 5:
+                                print(f"⚠️ Article {item.get('DOI', 'N/A')} added without date check (date not found)")
+                    
+                    items.extend(filtered_items)
+                    total_items += len(filtered_items)
+                    
                     cursor = data['message'].get('next-cursor')
                     
-                    status_text.text(f"📥 {translation_manager.get_text('loaded_articles').format(count=len(items))}")
-                    if cursor:
-                        progress = min(len(items) / (len(items) + 100), 0.95)
+                    status_text.text(f"📥 Loaded articles: {total_items} (page {page})")
+                    
+                    if cursor and total_items > 0:
+                        progress = min(total_items / (total_items + 500), 0.95)
                         progress_bar.progress(progress)
+                    
+                    print(f"📄 Page {page}: found {len(new_items)} articles, after filtering {len(filtered_items)}, total {total_items}")
                     
                     delayer.wait(success=True)
                     success = True
                     break
+                    
+                elif resp.status_code == 404:
+                    print(f"⚠️ Page {page}: 404 Not Found")
+                    break
+                    
+                else:
+                    print(f"⚠️ Page {page}: status {resp.status_code}")
+                    
             except Exception as e:
-                st.error(translation_manager.get_text('loading_error').format(error=e))
+                print(f"❌ Error on page {page}, attempt {attempt+1}/{RETRIES}: {e}")
+                if attempt < RETRIES - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+            
             delayer.wait(success=False)
+        
         if not success:
+            print(f"🚫 Failed to load page {page} after {RETRIES} attempts")
             break
+        
         if not new_items:
+            print(f"ℹ️ Page {page}: no new articles, finishing")
             break
     
     progress_bar.progress(1.0)
-    status_text.text(f"✅ {translation_manager.get_text('articles_loaded').format(count=len(items))}")
+    status_text.text(f"✅ {translation_manager.get_text('articles_loaded').format(count=total_items)}")
     time.sleep(0.5)
     progress_bar.empty()
     status_text.empty()
     progress_container.empty()
+    
+    print(f"🎯 Total loaded {total_items} articles for ISSN {issn} in period {from_date}-{until_date} using {date_strategy} strategy")
+    
+    # Debug: Show date sources for first 10 articles
+    if items and len(items) > 0:
+        print(f"\n📊 Date strategy analysis for first 10 articles:")
+        for i, item in enumerate(items[:10]):
+            doi = item.get('DOI', f'Article_{i+1}')
+            
+            # Get dates using both strategies for comparison
+            start_date, start_source = get_publication_date_by_strategy(item, 'start_created')
+            issue_date, issue_source = get_publication_date_by_strategy(item, 'issue_priority')
+            
+            print(f"  {i+1}. {doi}")
+            print(f"     • Start/Created: {start_date} (source: {start_source})")
+            print(f"     • Issue Priority: {issue_date} (source: {issue_source})")
     
     return items
 
@@ -2025,7 +2360,11 @@ def analyze_citation_accumulation(analyzed_metadata, state):
     }
 
 # === 13. Metadata Processing for Statistics ===
-def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=''):
+def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix='', date_strategy='issue_priority'):
+    """
+    Extract statistics from metadata with configurable date strategy.
+    date_strategy: 'start_created' or 'issue_priority'
+    """
     total_refs = 0
     refs_with_doi = 0
     refs_without_doi = 0
@@ -2062,27 +2401,22 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
         oa = meta.get('openalex')  # ДОБАВЛЕНО: определяем oa здесь
         
         if cr:
-            # Сначала получаем количество ссылок из Crossref
+            # Get reference count from Crossref
             refs = cr.get('reference', [])
             ref_count_cr = len(refs)
             
-            # Проверяем OpenAlex если в Crossref 0
+            # Check OpenAlex if Crossref has 0
             ref_count = 0
             if ref_count_cr == 0:
-                if oa:  # Теперь oa определена
+                if oa:  # Now oa is defined
                     ref_count_oa = oa.get('referenced_works_count', 0)
                     if ref_count_oa > 0:
                         ref_count = ref_count_oa
-                        # Для данных OpenAlex не можем определить DOI ссылок,
-                        # поэтому считаем все как ссылки без DOI
                         refs_without_doi += ref_count_oa
-                        # Предупреждение в лог
-                        # print(f"⚠️ Using OpenAlex reference count ({ref_count_oa}) for article")
                 else:
                     ref_count = 0
             else:
                 ref_count = ref_count_cr
-                # Анализируем ссылки из Crossref (проверяем DOI)
                 for ref in refs:
                     ref_doi = ref.get('DOI', '')
                     if ref_doi:
@@ -2113,9 +2447,27 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
                     name = family or 'Unknown'
                 author_freq[name] += 1
 
-            date_parts = cr.get('published', {}).get('date-parts', [[datetime.now().year]])[0]
-            pub_date = datetime(date_parts[0], date_parts[1] if len(date_parts)>1 else 1, date_parts[2] if len(date_parts)>2 else 1)
-            pub_dates.append(pub_date)
+            # UPDATED: Use configurable date strategy
+            date_parts, source = get_publication_date_by_strategy(cr, date_strategy)
+            if date_parts and len(date_parts) >= 1:
+                year = date_parts[0]
+                month = date_parts[1] if len(date_parts) > 1 else 1
+                day = date_parts[2] if len(date_parts) > 2 else 1
+                
+                # Validate date
+                try:
+                    pub_date = datetime(year, month, day)
+                    pub_dates.append(pub_date)
+                except (ValueError, TypeError) as e:
+                    # Use only year if date is invalid
+                    try:
+                        pub_date = datetime(year, 1, 1)
+                        pub_dates.append(pub_date)
+                    except:
+                        pass
+            else:
+                # If no date found, use current year as fallback
+                pub_dates.append(datetime(datetime.now().year, 1, 1))
 
             journal_name = cr.get('container-title', [''])[0] if cr.get('container-title') else ''
             if journal_name:
@@ -2170,7 +2522,6 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
                     if citation_count >= 50:
                         articles_with_50_citations += 1
             except Exception as e:
-                # Skip problematic records and continue processing
                 print(f"Warning processing OpenAlex data: {e}")
                 continue
 
@@ -2235,7 +2586,8 @@ def extract_stats_from_metadata(metadata_list, is_analyzed=True, journal_prefix=
         'all_journals': all_journals_sorted,
         'all_publishers': all_publishers_sorted,
         'unique_journals_count': len(journal_freq),
-        'unique_publishers_count': len(publisher_freq)
+        'unique_publishers_count': len(publisher_freq),
+        'date_strategy': date_strategy  # Added for tracking
     }
 
 # === 14. Enhanced Statistics Calculation ===
@@ -6633,36 +6985,35 @@ def create_visualizations(analyzed_stats, citing_stats, enhanced_stats, citation
 # =============================================================================
 # 19. OPTIMIZED MAIN ANALYSIS FUNCTION
 # =============================================================================
-
-def analyze_journal_optimized(issn, period_str, special_analysis=False, include_ror_data=False, include_author_id_data=False):
-    """Optimized version of analyze_journal with parallel processing and caching"""
+def analyze_journal_optimized(issn, period_str, date_strategy='issue_priority', special_analysis=False, include_ror_data=False, include_author_id_data=False):
+    """Optimized version of analyze_journal with parallel processing and configurable date strategy."""
     global delayer
     delayer = AdaptiveDelayer()
 
     analysis_start_time = time.time()
     
-    # Создаем контейнер для счетчика общего времени
+    # Create container for total time counter
     timer_container = st.empty()
     timer_container.info("⏱️ Starting analysis...")
     
     state = get_analysis_state()
     state.analysis_complete = False
     
-    # Функция для обновления счетчика общего времени
+    # Function to update total time counter
     def update_timer():
         elapsed_time = time.time() - analysis_start_time
         minutes = int(elapsed_time // 60)
         seconds = int(elapsed_time % 60)
         timer_container.info(f"⏱️ Total analysis time: {minutes:02d}:{seconds:02d}")
     
-    # Запускаем обновление таймера в отдельном потоке
+    # Start timer update in separate thread
     import threading
     stop_timer = False
     
     def timer_thread():
         while not stop_timer:
             update_timer()
-            time.sleep(1)  # Обновляем каждую секунду
+            time.sleep(1)  # Update every second
     
     timer_thread = threading.Thread(target=timer_thread, daemon=True)
     timer_thread.start()
@@ -6671,6 +7022,7 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     state.is_special_analysis = special_analysis
     state.include_ror_data = include_ror_data
     state.include_author_id_data = include_author_id_data
+    state.date_strategy = date_strategy  # Store date strategy
     
     # Predictive cache warmup
     predictive_cache_warmup(issn)
@@ -6704,17 +7056,25 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     overall_status.text(translation_manager.get_text('getting_journal_name'))
     journal_name = optimized_get_journal_name(issn)
     st.success(translation_manager.get_text('journal_found').format(journal_name=journal_name, issn=issn))
+    
+    # Show date strategy info
+    strategy_info = {
+        'start_created': 'Using start/created dates (earliest available dates)',
+        'issue_priority': 'Using issue priority dates (published-print -> journal-issue.published-online -> published-online -> published)'
+    }
+    st.info(f"📅 Date strategy: {strategy_info.get(date_strategy, 'Unknown strategy')}")
+    
     overall_progress.progress(0.2)
     
-    # Article retrieval
+    # Article retrieval with configurable date strategy
     overall_status.text(translation_manager.get_text('loading_articles'))
-    items = fetch_articles_by_issn_period(issn, from_date, until_date)
+    items = fetch_articles_by_issn_period(issn, from_date, until_date, date_strategy)
     if not items:
         st.error(translation_manager.get_text('no_articles_found'))
         return
 
     n_analyzed = len(items)
-    st.success(translation_manager.get_text('articles_found').format(count=n_analyzed))
+    st.success(f"✅ Found {n_analyzed} articles using {date_strategy} date strategy")
     overall_progress.progress(0.3)
     
     # Data validation
@@ -6784,9 +7144,12 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     citing_status.empty()
     
     # Unique citing works
-    unique_citing_dois = set(c['doi'] for c in all_citing_metadata if c.get('doi'))
+    unique_citing_dois = set()
+    for c in all_citing_metadata:
+        if isinstance(c, dict) and c.get('doi'):
+            unique_citing_dois.add(c['doi'])
     n_citing = len(unique_citing_dois)
-    st.success(translation_manager.get_text('unique_citing_works').format(count=n_citing))
+    st.success(f"✅ Found {n_citing} unique citing works")
     overall_progress.progress(0.7)
     
     # PARALLEL: Statistics and metrics calculation
@@ -6798,8 +7161,9 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     
     # Start parallel calculations
     with ThreadPoolExecutor(max_workers=3) as executor:
-        future_analyzed_stats = executor.submit(extract_stats_from_metadata, analyzed_metadata, journal_prefix=journal_prefix)
-        future_citing_stats = executor.submit(extract_stats_from_metadata, all_citing_metadata, is_analyzed=False)
+        # Pass date_strategy to statistics functions
+        future_analyzed_stats = executor.submit(extract_stats_from_metadata, analyzed_metadata, True, journal_prefix, date_strategy)
+        future_citing_stats = executor.submit(extract_stats_from_metadata, all_citing_metadata, False, '', date_strategy)
         future_parallel_metrics = executor.submit(parallel_metrics_calculation, analyzed_metadata, all_citing_metadata, state, issn)
         
         # Wait for completion with progress updates
@@ -6832,13 +7196,16 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
         all_citing_metadata, 
         state, 
         citation_timing['days_median'],
-        analyzed_stats,  # передаем статистику
-        citing_stats     # передаем статистику
+        analyzed_stats,  # pass statistics
+        citing_stats     # pass statistics
     )
     
     # Add special analysis metrics if available
     if state.is_special_analysis and 'special_analysis' in additional_data:
         additional_data['special_analysis_metrics'] = additional_data['special_analysis']
+    
+    # Add date strategy info to results
+    additional_data['date_strategy'] = date_strategy
     
     overall_progress.progress(0.9)
     
@@ -6851,9 +7218,9 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     seconds = int(analysis_duration % 60)
     
     st.success(f"✅ Data analysis completed in {minutes}m {seconds}s")
-    st.info("📊 Now generating Excel report...")
+    st.info(f"📊 Now generating Excel report using {date_strategy} date strategy...")
     
-    excel_start_time = time.time()  # Таймер для генерации Excel
+    excel_start_time = time.time()  # Timer for Excel generation
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f'journal_analysis_{issn}_{timestamp}.xlsx'
@@ -6925,7 +7292,8 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
         'issn': issn,
         'period': period_str,
         'n_analyzed': n_analyzed,
-        'n_citing': n_citing
+        'n_citing': n_citing,
+        'date_strategy': date_strategy  # Add date strategy to results
     }
     
     # Add special analysis metrics to results if available
@@ -6941,11 +7309,11 @@ def analyze_journal_optimized(issn, period_str, special_analysis=False, include_
     overall_progress.empty()
     overall_status.empty()
 
-    # Останавливаем таймер
+    # Stop timer
     stop_timer = True
     timer_thread.join(timeout=1)
     
-    # Финальное отображение времени
+    # Final time display
     elapsed_time = time.time() - analysis_start_time
     minutes = int(elapsed_time // 60)
     seconds = int(elapsed_time % 60)
@@ -6999,6 +7367,41 @@ def main_optimized():
             help=translation_manager.get_text('period_examples'),
             disabled=special_analysis
         )
+        
+        st.markdown("---")
+        
+        # Date Strategy Selection
+        st.subheader("📅 Date Analysis Strategy")
+        
+        # Create columns for exclusive checkboxes
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            use_start_created = st.checkbox(
+                "Use start/created dates",
+                value=False,
+                help="Use earliest available dates: start → created"
+            )
+        
+        with col2:
+            use_issue_priority = st.checkbox(
+                "Use issue priority dates", 
+                value=True,
+                help="Use publication dates: published-print → journal-issue.published-online → published-online → published"
+            )
+        
+        # Make checkboxes mutually exclusive
+        if use_start_created and use_issue_priority:
+            # If both are checked, uncheck the second one
+            use_issue_priority = False
+        
+        # Set date strategy based on selection
+        if use_start_created:
+            date_strategy = 'start_created'
+            st.info("🔍 Date strategy: **Start/Created dates** - Using earliest available dates (start → created)")
+        else:
+            date_strategy = 'issue_priority'
+            st.info("🔍 Date strategy: **Issue priority dates** - Using official publication dates")
         
         st.markdown("---")
         
@@ -7125,7 +7528,7 @@ def main_optimized():
     with col1:
         st.subheader("🚀 " + translation_manager.get_text('start_analysis'))
         
-        # Use optimized analysis function
+        # Use optimized analysis function with date strategy
         if st.button("🚀 Start Optimized Analysis", type="primary", use_container_width=True):
             if not issn:
                 st.error(translation_manager.get_text('issn_required'))
@@ -7134,9 +7537,20 @@ def main_optimized():
             if not period and not special_analysis:
                 st.error(translation_manager.get_text('period_required'))
                 return
+            
+            # Show selected date strategy
+            strategy_name = "Start/Created dates" if date_strategy == 'start_created' else "Issue priority dates"
+            st.info(f"📊 Analysis will use: **{strategy_name}**")
                 
-            with st.spinner("Starting optimized analysis with parallel processing..."):
-                analyze_journal_optimized(issn, period, special_analysis, include_ror_data, include_author_id_data)
+            with st.spinner(f"Starting optimized analysis with {strategy_name}..."):
+                analyze_journal_optimized(
+                    issn, 
+                    period, 
+                    date_strategy,  # Pass date strategy
+                    special_analysis, 
+                    include_ror_data, 
+                    include_author_id_data
+                )
     
     with col2:
         st.subheader("📤 " + translation_manager.get_text('results'))
@@ -7195,3 +7609,4 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
