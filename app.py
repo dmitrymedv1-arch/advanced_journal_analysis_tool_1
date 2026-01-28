@@ -1875,6 +1875,45 @@ def get_publication_date_by_strategy(crossref_data, date_strategy='issue_priorit
     else:  # 'issue_priority'
         return extract_issue_priority_year(crossref_data)
 
+def extract_year_from_date_field(date_field):
+    """
+    Extract year from any Crossref date field.
+    Handles different date formats in Crossref API.
+    """
+    if not date_field:
+        return None
+    
+    try:
+        # Format: {"date-parts": [[2025, 1, 15]]}
+        if isinstance(date_field, dict) and 'date-parts' in date_field:
+            date_parts = date_field['date-parts']
+            if date_parts and isinstance(date_parts, list) and len(date_parts) > 0:
+                first_part = date_parts[0]
+                if first_part and isinstance(first_part, list) and len(first_part) > 0:
+                    year = first_part[0]
+                    if isinstance(year, (int, float)):
+                        return int(year)
+        
+        # Format: {"timestamp": 1736726400000} or other formats
+        elif isinstance(date_field, (int, float, str)):
+            try:
+                if isinstance(date_field, (int, float)):
+                    dt = datetime.fromtimestamp(date_field / 1000)
+                    return dt.year
+                elif isinstance(date_field, str):
+                    for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m', '%Y']:
+                        try:
+                            dt = datetime.strptime(date_field[:10], fmt)
+                            return dt.year
+                        except:
+                            continue
+            except:
+                pass
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        return None
+    
+    return None
+
 def debug_article_dates(article_data, doi):
     """
     Debug function to show all date fields in an article.
@@ -1992,19 +2031,109 @@ def filter_articles_by_date_strategy(articles, from_year, until_year, date_strat
 def compare_date_strategies(issn, from_year, until_year):
     """
     Compare date strategies to show differences.
-    Useful for debugging and understanding date discrepancies.
+    Now uses the new approach with expanded date range.
     """
     print(f"\n🔍 COMPARING DATE STRATEGIES FOR ISSN {issn}")
-    print(f"📅 Period: {from_year}-{until_year}")
+    print(f"📅 Target period: {from_year}-{until_year}")
     print("=" * 80)
     
-    # Get articles using both strategies
     from_date = f"{from_year}-01-01"
     until_date = f"{until_year}-12-31"
     
-    # Fetch articles with both strategies
-    items_start = fetch_articles_by_issn_period(issn, from_date, until_date, 'start_created')
-    items_issue = fetch_articles_by_issn_period(issn, from_date, until_date, 'issue_priority')
+    # First, get ALL articles with expanded date range
+    print(f"\n🔍 Fetching ALL articles with expanded date range...")
+    
+    # We'll use a simplified version of fetch_articles_by_issn_period
+    # that returns ALL articles without filtering
+    all_items = []
+    cursor = "*"
+    base_url = "https://api.crossref.org/works"
+    
+    # Use very expanded range to get everything
+    expanded_from_date = f"{max(1900, from_year - 5)}-01-01"
+    expanded_until_date = f"{min(datetime.now().year + 2, until_year + 5)}-12-31"
+    
+    print(f"   Expanded search range: {expanded_from_date} to {expanded_until_date}")
+    
+    filter_parts = [
+        f'issn:{issn}',
+        f'from-pub-date:{expanded_from_date}',
+        f'until-pub-date:{expanded_until_date}'
+    ]
+    
+    params = {
+        'filter': ','.join(filter_parts),
+        'rows': 1000,
+        'cursor': cursor,
+        'mailto': EMAIL
+    }
+    
+    page = 0
+    while cursor:
+        page += 1
+        params['cursor'] = cursor
+        
+        try:
+            rate_limiter.wait_if_needed()
+            resp = requests.get(base_url, params=params, timeout=15)
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                new_items = data['message'].get('items', [])
+                
+                for item in new_items:
+                    if item and item.get('DOI'):
+                        all_items.append(item)
+                
+                cursor = data['message'].get('next-cursor')
+                print(f"   Page {page}: found {len(new_items)} articles, total {len(all_items)}")
+                
+                if not new_items:
+                    break
+            else:
+                break
+                
+        except Exception as e:
+            print(f"   Error on page {page}: {e}")
+            break
+    
+    print(f"✅ Total articles found: {len(all_items)}")
+    
+    if not all_items:
+        print("❌ No articles found for this ISSN")
+        return None
+    
+    # Now filter using both strategies
+    print(f"\n🔍 Filtering articles using both strategies...")
+    
+    items_start = []
+    items_issue = []
+    
+    for i, item in enumerate(all_items):
+        if not item or not item.get('DOI'):
+            continue
+        
+        doi = item.get('DOI', f'Article_{i+1}')
+        
+        # Check start/created strategy
+        start_date, start_source = get_publication_date_by_strategy(item, 'start_created')
+        if start_date and len(start_date) >= 1:
+            year = start_date[0]
+            try:
+                if from_year <= int(year) <= until_year:
+                    items_start.append(item)
+            except (ValueError, TypeError):
+                pass
+        
+        # Check issue priority strategy
+        issue_date, issue_source = get_publication_date_by_strategy(item, 'issue_priority')
+        if issue_date and len(issue_date) >= 1:
+            year = issue_date[0]
+            try:
+                if from_year <= int(year) <= until_year:
+                    items_issue.append(item)
+            except (ValueError, TypeError):
+                pass
     
     print(f"\n📊 RESULTS:")
     print(f"• Articles with start/created strategy: {len(items_start)}")
@@ -2022,25 +2151,45 @@ def compare_date_strategies(issn, from_year, until_year):
     print(f"• DOIs only in issue priority: {len(only_in_issue)}")
     print(f"• DOIs in both: {len(in_both)}")
     
-    # Analyze differences
+    # Show detailed examples
     if only_in_start:
-        print(f"\n📝 DOIs only found with start/created strategy:")
-        for doi in list(only_in_start)[:10]:  # Show first 10
-            # Find the article to analyze its dates
-            article = next((item for item in items_start if item.get('DOI') == doi), None)
-            if article:
-                start_date, start_source = get_publication_date_by_strategy(article, 'start_created')
-                issue_date, issue_source = get_publication_date_by_strategy(article, 'issue_priority')
-                print(f"  • {doi}: start/created={start_date} ({start_source}), issue={issue_date} ({issue_source})")
+        print(f"\n📝 Example DOIs only found with start/created strategy:")
+        count = 0
+        for item in items_start:
+            doi = item.get('DOI')
+            if doi and doi in only_in_start and count < 5:
+                start_date, start_source = get_publication_date_by_strategy(item, 'start_created')
+                issue_date, issue_source = get_publication_date_by_strategy(item, 'issue_priority')
+                
+                print(f"  • {doi}")
+                print(f"    - Start/Created: {start_date} ({start_source})")
+                print(f"    - Issue Priority: {issue_date} ({issue_source})")
+                
+                # Show published date from Crossref
+                if 'published' in item:
+                    pub_year = extract_year_from_date_field(item['published'])
+                    print(f"    - Crossref 'published': {pub_year}")
+                
+                count += 1
     
     if only_in_issue:
-        print(f"\n📝 DOIs only found with issue priority strategy:")
-        for doi in list(only_in_issue)[:10]:  # Show first 10
-            article = next((item for item in items_issue if item.get('DOI') == doi), None)
-            if article:
-                start_date, start_source = get_publication_date_by_strategy(article, 'start_created')
-                issue_date, issue_source = get_publication_date_by_strategy(article, 'issue_priority')
-                print(f"  • {doi}: start/created={start_date} ({start_source}), issue={issue_date} ({issue_source})")
+        print(f"\n📝 Example DOIs only found with issue priority strategy:")
+        count = 0
+        for item in items_issue:
+            doi = item.get('DOI')
+            if doi and doi in only_in_issue and count < 5:
+                start_date, start_source = get_publication_date_by_strategy(item, 'start_created')
+                issue_date, issue_source = get_publication_date_by_strategy(item, 'issue_priority')
+                
+                print(f"  • {doi}")
+                print(f"    - Start/Created: {start_date} ({start_source})")
+                print(f"    - Issue Priority: {issue_date} ({issue_source})")
+                
+                if 'published' in item:
+                    pub_year = extract_year_from_date_field(item['published'])
+                    print(f"    - Crossref 'published': {pub_year}")
+                
+                count += 1
     
     # Return comparison data
     return {
@@ -2049,25 +2198,39 @@ def compare_date_strategies(issn, from_year, until_year):
         'only_start': len(only_in_start),
         'only_issue': len(only_in_issue),
         'both': len(in_both),
-        'sample_only_start': list(only_in_start)[:5] if only_in_start else [],
-        'sample_only_issue': list(only_in_issue)[:5] if only_in_issue else []
+        'total_articles': len(all_items)
     }
 
 # === 8. Article Retrieval from Crossref ===
 def fetch_articles_by_issn_period(issn, from_date, until_date, date_strategy='issue_priority'):
     """
-    Fetch articles with configurable date strategy.
-    date_strategy: 'start_created' or 'issue_priority'
+    Fetch ALL articles from Crossref and then filter locally by date strategy.
+    This solves the problem where Crossref filters by 'published' date,
+    but we want to filter by custom date strategies.
     """
     base_url = "https://api.crossref.org/works"
     items = []
     cursor = "*"
     
-    # Prepare filters
+    # IMPORTANT: We need to search with expanded date range
+    # because Crossref filters by 'published' date, not our custom dates
+    from_year = int(from_date.split('-')[0])
+    until_year = int(until_date.split('-')[0])
+    
+    # Expand search range by ±2 years to catch articles with date discrepancies
+    expanded_from_year = max(1900, from_year - 2)
+    expanded_until_year = min(datetime.now().year + 1, until_year + 2)
+    
+    expanded_from_date = f"{expanded_from_year}-01-01"
+    expanded_until_date = f"{expanded_until_year}-12-31"
+    
+    print(f"🔍 Fetching articles with expanded date range: {expanded_from_date} to {expanded_until_date}")
+    print(f"   (Will filter to target range: {from_date} to {until_date} using {date_strategy} strategy)")
+    
     filter_parts = [
         f'issn:{issn}',
-        f'from-pub-date:{from_date}',
-        f'until-pub-date:{until_date}'
+        f'from-pub-date:{expanded_from_date}',
+        f'until-pub-date:{expanded_until_date}'
     ]
     
     params = {
@@ -2084,7 +2247,8 @@ def fetch_articles_by_issn_period(issn, from_date, until_date, date_strategy='is
     with progress_container:
         st.info(f"📥 {translation_manager.get_text('loading_articles')} **Crossref** {translation_manager.get_text('and')} **OpenAlex**.")
         st.info(f"🔍 Date strategy: {'Start/Created dates' if date_strategy == 'start_created' else 'Issue priority dates'}")
-        st.info(f"📅 Date range: {from_date} to {until_date}")
+        st.info(f"📅 Target range: {from_date} to {until_date}")
+        st.info(f"🔍 Searching with expanded range: {expanded_from_date} to {expanded_until_date}")
     
     total_items = 0
     page = 0
@@ -2103,47 +2267,21 @@ def fetch_articles_by_issn_period(issn, from_date, until_date, date_strategy='is
                     data = resp.json()
                     new_items = data['message'].get('items', [])
                     
-                    # Filter items based on selected date strategy
-                    filtered_items = []
+                    # Add ALL articles first, we'll filter later
                     for item in new_items:
-                        if not item or not item.get('DOI'):
-                            continue
-                        
-                        # Extract date based on selected strategy
-                        date_parts, source = get_publication_date_by_strategy(item, date_strategy)
-                        
-                        if date_parts and len(date_parts) >= 1:
-                            year = date_parts[0]
-                            
-                            # Convert string dates to years for comparison
-                            from_year = int(from_date.split('-')[0])
-                            until_year = int(until_date.split('-')[0])
-                            
-                            if from_year <= year <= until_year:
-                                filtered_items.append(item)
-                                if total_items < 5:  # Debug first 5 items
-                                    print(f"✅ Article {item.get('DOI', 'N/A')} added: year {year} (source: {source})")
-                            else:
-                                if total_items < 5:  # Debug first 5 filtered out items
-                                    print(f"❌ Article {item.get('DOI', 'N/A')} filtered out: year {year} (source: {source}) outside range {from_year}-{until_year}")
-                        else:
-                            # If no date found, still include for analysis
-                            filtered_items.append(item)
-                            if total_items < 5:
-                                print(f"⚠️ Article {item.get('DOI', 'N/A')} added without date check (date not found)")
-                    
-                    items.extend(filtered_items)
-                    total_items += len(filtered_items)
+                        if item and item.get('DOI'):
+                            items.append(item)
+                            total_items += 1
                     
                     cursor = data['message'].get('next-cursor')
                     
                     status_text.text(f"📥 Loaded articles: {total_items} (page {page})")
                     
                     if cursor and total_items > 0:
-                        progress = min(total_items / (total_items + 500), 0.95)
+                        progress = min(total_items / (total_items + 1000), 0.95)
                         progress_bar.progress(progress)
                     
-                    print(f"📄 Page {page}: found {len(new_items)} articles, after filtering {len(filtered_items)}, total {total_items}")
+                    print(f"📄 Page {page}: found {len(new_items)} articles, total {total_items}")
                     
                     delayer.wait(success=True)
                     success = True
@@ -2172,29 +2310,102 @@ def fetch_articles_by_issn_period(issn, from_date, until_date, date_strategy='is
             break
     
     progress_bar.progress(1.0)
-    status_text.text(f"✅ {translation_manager.get_text('articles_loaded').format(count=total_items)}")
-    time.sleep(0.5)
-    progress_bar.empty()
-    status_text.empty()
-    progress_container.empty()
+    status_text.text(f"✅ Loaded {total_items} articles from Crossref")
     
-    print(f"🎯 Total loaded {total_items} articles for ISSN {issn} in period {from_date}-{until_date} using {date_strategy} strategy")
+    # NOW FILTER ARTICLES BY OUR DATE STRATEGY
+    print(f"\n🔍 Filtering {len(items)} articles using {date_strategy} strategy...")
     
-    # Debug: Show date sources for first 10 articles
-    if items and len(items) > 0:
-        print(f"\n📊 Date strategy analysis for first 10 articles:")
-        for i, item in enumerate(items[:10]):
+    filtered_items = []
+    from_year_target = int(from_date.split('-')[0])
+    until_year_target = int(until_date.split('-')[0])
+    
+    date_stats = {
+        'total_checked': 0,
+        'passed_filter': 0,
+        'failed_filter': 0,
+        'no_date': 0,
+        'date_sources': {}
+    }
+    
+    for i, item in enumerate(items):
+        if not item or not item.get('DOI'):
+            continue
+        
+        date_stats['total_checked'] += 1
+        doi = item.get('DOI', f'Article_{i+1}')
+        
+        # Get date using specified strategy
+        date_parts, source = get_publication_date_by_strategy(item, date_strategy)
+        
+        if source:
+            date_stats['date_sources'][source] = date_stats['date_sources'].get(source, 0) + 1
+        
+        if not date_parts or len(date_parts) < 1:
+            date_stats['no_date'] += 1
+            if i < 10:
+                print(f"⚠️ Article {doi}: date not found with {date_strategy} strategy")
+            continue
+        
+        year = date_parts[0]
+        
+        # Validate year
+        try:
+            year_int = int(year)
+        except (ValueError, TypeError):
+            date_stats['failed_filter'] += 1
+            if i < 10:
+                print(f"❌ Article {doi}: invalid year {year}, filtered out")
+            continue
+        
+        # Check if year is in target range
+        if from_year_target <= year_int <= until_year_target:
+            filtered_items.append(item)
+            date_stats['passed_filter'] += 1
+            if i < 10:
+                print(f"✅ Article {doi}: year {year_int} in target range (source: {source})")
+        else:
+            date_stats['failed_filter'] += 1
+            if i < 10:
+                print(f"❌ Article {doi}: year {year_int} outside target range (source: {source})")
+    
+    print(f"\n📊 Filtering results:")
+    print(f"   Total articles from Crossref: {len(items)}")
+    print(f"   Articles after {date_strategy} filtering: {len(filtered_items)}")
+    print(f"   Date sources used: {dict(date_stats['date_sources'])}")
+    print(f"   Articles without date: {date_stats['no_date']}")
+    
+    # Show comparison between strategies for debugging
+    if len(items) > 0 and len(filtered_items) == 0:
+        print(f"\n⚠️ WARNING: Found {len(items)} articles from Crossref but 0 after filtering!")
+        print(f"   This suggests date discrepancies. Checking first 5 articles...")
+        
+        for i, item in enumerate(items[:5]):
             doi = item.get('DOI', f'Article_{i+1}')
             
-            # Get dates using both strategies for comparison
+            # Get dates using both strategies
             start_date, start_source = get_publication_date_by_strategy(item, 'start_created')
             issue_date, issue_source = get_publication_date_by_strategy(item, 'issue_priority')
             
             print(f"  {i+1}. {doi}")
             print(f"     • Start/Created: {start_date} (source: {start_source})")
             print(f"     • Issue Priority: {issue_date} (source: {issue_source})")
+            
+            # Also show what Crossref thinks the date is
+            if 'published' in item:
+                pub_date = extract_year_from_date_field(item['published'])
+                print(f"     • Crossref 'published': {pub_date}")
+            
+            # Debug all date fields
+            debug_article_dates(item, doi)
     
-    return items
+    time.sleep(0.5)
+    progress_bar.empty()
+    status_text.empty()
+    progress_container.empty()
+    
+    print(f"🎯 Final: {len(filtered_items)} articles for ISSN {issn} in period {from_date}-{until_date} using {date_strategy} strategy")
+    
+    return filtered_items
 
 # === 9. DOI Prefix Extraction ===
 def normalize_doi(doi):
@@ -7402,8 +7613,41 @@ def main_optimized():
         else:
             date_strategy = 'issue_priority'
             st.info("🔍 Date strategy: **Issue priority dates** - Using official publication dates")
-        
+
         st.markdown("---")
+        
+        # Button to compare date strategies
+        if st.button("🔄 Compare Date Strategies", use_container_width=True):
+            if not issn:
+                st.error("Please enter ISSN first")
+            else:
+                try:
+                    from_year = int(period.split('-')[0].strip())
+                    until_year = int(period.split('-')[1].strip()) if '-' in period else from_year
+                    
+                    with st.spinner("Comparing date strategies..."):
+                        result = compare_date_strategies(issn, from_year, until_year)
+                        
+                        if result:
+                            st.subheader("📊 Date Strategy Comparison")
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Start/Created", result['start_count'])
+                            with col2:
+                                st.metric("Issue Priority", result['issue_count'])
+                            with col3:
+                                st.metric("In Both", result['both'])
+                            
+                            st.info(f"Total articles found: {result['total_articles']}")
+                            
+                            if result['only_start'] > 0:
+                                st.warning(f"{result['only_start']} articles only with Start/Created strategy")
+                            if result['only_issue'] > 0:
+                                st.warning(f"{result['only_issue']} articles only with Issue Priority strategy")
+                            
+                except Exception as e:
+                    st.error(f"Error comparing strategies: {e}")
         
         # Include ROR data checkbox
         include_ror_data = st.checkbox(
@@ -7609,4 +7853,5 @@ def main_optimized():
 if __name__ == "__main__":
     # Use optimized version by default
     main_optimized()
+
 
