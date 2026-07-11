@@ -30,6 +30,11 @@ from contextlib import asynccontextmanager
 import diskcache
 from functools import wraps
 from collections import defaultdict
+import threading
+import signal
+import sys
+
+threading.stack_size(8388608)
 
 # Import translation manager
 from languages import translation_manager
@@ -490,10 +495,14 @@ def process_data_in_chunks(data, chunk_size=500, process_func=None):
 # CONFIGURATION AND SETTINGS (ORIGINAL)
 # =============================================================================
 
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Dict, Any, Optional, Union, Type
+from enum import Enum
+
 class AppSettings(BaseModel):
     """Application settings with validation"""
-    email: str = "your.email@example.com"
-    max_workers: int = 5
+    email: str = Field(default="your.email@example.com", description="Email for API requests")
+    max_workers: int = Field(default=5, ge=1, le=20, description="Maximum number of worker threads")
     retries: int = 3
     delays: List[float] = [0.2, 0.5, 0.7, 1.0, 1.3, 1.5, 2.0]
     api_timeouts: Dict[str, int] = {
@@ -508,14 +517,16 @@ class AppSettings(BaseModel):
     cache_ttl: int = 3600  # 1 hour
     max_cache_size: int = 1000
     
-    @validator('email')
-    def validate_email(cls, v):
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v: str) -> str:
         if '@' not in v:
             raise ValueError('Invalid email format')
         return v
     
-    @validator('max_workers')
-    def validate_max_workers(cls, v):
+    @field_validator('max_workers')
+    @classmethod
+    def validate_max_workers(cls, v: int) -> int:
         if v < 1 or v > 20:
             raise ValueError('max_workers must be between 1 and 20')
         return v
@@ -538,8 +549,12 @@ class AnalysisConfig:
 # DATA MODELS (ORIGINAL)
 # =============================================================================
 
+from pydantic import ConfigDict
+
 class ArticleMetadata(BaseModel):
     """Model for article metadata"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     doi: Optional[str] = None
     title: Optional[str] = None
     authors: List[str] = []
@@ -554,9 +569,6 @@ class ArticleMetadata(BaseModel):
     work_type: Optional[str] = None
     concepts: List[Dict[str, Any]] = []
     open_access: bool = False
-    
-    class Config:
-        arbitrary_types_allowed = True
 
 class JournalMetrics(BaseModel):
     """Model for journal metrics"""
@@ -579,6 +591,8 @@ class JournalMetrics(BaseModel):
 
 class AnalysisResult(BaseModel):
     """Complete analysis result model"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     journal_name: str
     issn: str
     analysis_period: str
@@ -587,9 +601,6 @@ class AnalysisResult(BaseModel):
     metrics: JournalMetrics
     timestamp: datetime = datetime.now()
     additional_data: Dict[str, Any] = {}
-    
-    class Config:
-        arbitrary_types_allowed = True
 
 # =============================================================================
 # CACHE MANAGEMENT (ORIGINAL)
@@ -7840,8 +7851,14 @@ def main_optimized():
 # =============================================================================
 
 if __name__ == "__main__":
-    # Use optimized version by default
-    main_optimized()
+    try:
+        # Use optimized version by default
+        main_optimized()
+    except Exception as e:
+        import traceback
+        print(f"Fatal error: {e}")
+        traceback.print_exc()
+        raise
 
 
 
