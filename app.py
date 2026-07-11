@@ -7210,24 +7210,18 @@ def analyze_journal_optimized(issn, period_str, date_strategy='issue_priority', 
     state = get_analysis_state()
     state.analysis_complete = False
     
-    # Function to update total time counter
-    def update_timer():
-        elapsed_time = time.time() - analysis_start_time
+    # Функция для отображения времени - теперь синхронная, вызывается в основном потоке
+    def display_time(elapsed_time):
         minutes = int(elapsed_time // 60)
         seconds = int(elapsed_time % 60)
-        timer_container.info(f"⏱️ Total analysis time: {minutes:02d}:{seconds:02d}")
+        return f"⏱️ Running: {minutes:02d}:{seconds:02d}"
     
-    # Start timer update in separate thread
-    import threading
-    stop_timer = False
+    # Сохраняем время начала
+    analysis_start_time = time.time()
     
-    def timer_thread():
-        while not stop_timer:
-            update_timer()
-            time.sleep(1)  # Update every second
-    
-    timer_thread = threading.Thread(target=timer_thread, daemon=True)
-    timer_thread.start()
+    # Используем прогресс-бар для индикации хода выполнения
+    overall_progress = st.progress(0)
+    overall_status = st.empty()
     
     # Set analysis modes
     state.is_special_analysis = special_analysis
@@ -7528,7 +7522,7 @@ def analyze_journal_optimized(issn, period_str, date_strategy='issue_priority', 
     elapsed_time = time.time() - analysis_start_time
     minutes = int(elapsed_time // 60)
     seconds = int(elapsed_time % 60)
-    timer_container.success(f"✅ Total analysis completed in: {minutes:02d}:{seconds:02d}")
+    status.update(label=f"✅ Analysis completed in {minutes:02d}:{seconds:02d}", state="complete")
 
 # =============================================================================
 # 20. UPDATED MAIN INTERFACE WITH OPTIMIZED ANALYSIS
